@@ -51,6 +51,10 @@
 			value: 'mbox_import',
 			label: $t('app.components.ingestion_source_form.provider_mbox_import'),
 		},
+		{
+			value: 'outlook_com',
+			label: 'Outlook COM Push',
+		},
 	];
 
 	/** Only show root sources (not children) in the merge dropdown */
@@ -241,6 +245,16 @@
 				>{$t('app.components.ingestion_source_form.tenant_id')}</Label
 			>
 			<Input id="tenantId" bind:value={formData.providerConfig.tenantId} class="col-span-3" />
+		</div>
+	{:else if formData.provider === 'outlook_com'}
+		<div class="grid grid-cols-4 items-center gap-4">
+			<Label for="mailboxEmail" class="text-left">Mailbox Email</Label>
+			<Input
+				id="mailboxEmail"
+				type="email"
+				bind:value={formData.providerConfig.mailboxEmail}
+				class="col-span-3"
+			/>
 		</div>
 	{:else if formData.provider === 'generic_imap'}
 		<div class="grid grid-cols-4 items-center gap-4">

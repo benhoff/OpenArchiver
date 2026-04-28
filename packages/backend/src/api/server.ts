@@ -135,8 +135,8 @@ export async function createServer(modules: ArchiverModule[] = []): Promise<Expr
 		}
 		rateLimiter(req, res, next);
 	});
-	app.use(express.json());
-	app.use(express.urlencoded({ extended: true }));
+	app.use(express.json({ limit: config.api.requestBodyLimit }));
+	app.use(express.urlencoded({ extended: true, limit: config.api.requestBodyLimit }));
 
 	// i18n middleware
 	app.use(i18nextMiddleware.handle(i18next));

@@ -119,8 +119,8 @@
 		}
 	};
 
-	const handleSync = async (id: string) => {
-		const res = await api(`/ingestion-sources/${id}/sync`, { method: 'POST' });
+	const handleSync = async (source: SafeIngestionSource) => {
+		const res = await api(`/ingestion-sources/${source.id}/sync`, { method: 'POST' });
 		if (!res.ok) {
 			const errorBody = await res.json();
 			setAlert({
@@ -133,8 +133,8 @@
 			return;
 		}
 		ingestionSources = ingestionSources.map((s) => {
-			if (s.id === id) {
-				return { ...s, status: 'syncing' as const };
+			if (s.id === source.id) {
+				return { ...s, status: source.provider === 'outlook_com' ? 'active' : 'syncing' };
 			}
 			return s;
 		});
@@ -266,17 +266,20 @@
 			}
 			// Backend cascades force sync to non-file-based children,
 			// so optimistically mark root + eligible children as syncing
-			const fileBasedProviders = ['pst_import', 'eml_import', 'mbox_import'];
+			const nonSyncProviders = ['pst_import', 'eml_import', 'mbox_import', 'outlook_com'];
 			ingestionSources = ingestionSources.map((s) => {
 				// Mark selected roots as syncing
 				if (selectedIds.includes(s.id)) {
+					if (nonSyncProviders.includes(s.provider)) {
+						return { ...s, status: 'active' as const };
+					}
 					return { ...s, status: 'syncing' as const };
 				}
 				// Mark non-file-based children of selected roots as syncing
 				if (
 					s.mergedIntoId &&
 					selectedIds.includes(s.mergedIntoId) &&
-					!fileBasedProviders.includes(s.provider) &&
+					!nonSyncProviders.includes(s.provider) &&
 					(s.status === 'active' || s.status === 'error')
 				) {
 					return { ...s, status: 'syncing' as const };
@@ -541,7 +544,7 @@
 										<DropdownMenu.Item onclick={() => openEditDialog(source)}
 											>{$t('app.ingestions.edit')}</DropdownMenu.Item
 										>
-										<DropdownMenu.Item onclick={() => handleSync(source.id)}
+										<DropdownMenu.Item onclick={() => handleSync(source)}
 											>{$t('app.ingestions.force_sync')}</DropdownMenu.Item
 										>
 										<DropdownMenu.Separator />
@@ -644,7 +647,7 @@
 													>{$t('app.ingestions.edit')}</DropdownMenu.Item
 												>
 												<DropdownMenu.Item
-													onclick={() => handleSync(child.id)}
+													onclick={() => handleSync(child)}
 													>{$t(
 														'app.ingestions.force_sync'
 													)}</DropdownMenu.Item

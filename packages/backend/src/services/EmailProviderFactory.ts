@@ -9,6 +9,7 @@ import type {
 	EmailObject,
 	SyncState,
 	MailboxUser,
+	OutlookComCredentials,
 } from '@open-archiver/types';
 import { GoogleWorkspaceConnector } from './ingestion-connectors/GoogleWorkspaceConnector';
 import { MicrosoftConnector } from './ingestion-connectors/MicrosoftConnector';
@@ -16,6 +17,7 @@ import { ImapConnector } from './ingestion-connectors/ImapConnector';
 import { PSTConnector } from './ingestion-connectors/PSTConnector';
 import { EMLConnector } from './ingestion-connectors/EMLConnector';
 import { MboxConnector } from './ingestion-connectors/MboxConnector';
+import { OutlookComConnector } from './ingestion-connectors/OutlookComConnector';
 
 /**
  * Options passed to connectors to control ingestion behaviour.
@@ -66,6 +68,8 @@ export class EmailProviderFactory {
 				return new EMLConnector(credentials as EMLImportCredentials, options);
 			case 'mbox_import':
 				return new MboxConnector(credentials as MboxImportCredentials, options);
+			case 'outlook_com':
+				return new OutlookComConnector(credentials as OutlookComCredentials);
 			default:
 				throw new Error(`Unsupported provider: ${source.provider}`);
 		}

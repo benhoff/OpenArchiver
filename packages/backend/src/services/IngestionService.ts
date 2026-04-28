@@ -55,6 +55,10 @@ export class IngestionService {
 		return ['pst_import', 'eml_import', 'mbox_import'];
 	}
 
+	public static returnClientPushIngestions(): IngestionProvider[] {
+		return ['outlook_com', 'smtp_journaling'];
+	}
+
 	public static async create(
 		dto: CreateIngestionSourceDto,
 		userId: string,
@@ -100,6 +104,20 @@ export class IngestionService {
 				'Failed to process newly created ingestion source due to a decryption error.'
 			);
 		}
+
+		// Client-push sources do not have provider credentials to validate from backend workers.
+		if (this.returnClientPushIngestions().includes(decryptedSource.provider)) {
+			return await this.update(
+				decryptedSource.id,
+				{
+					status: 'active',
+					lastSyncStatusMessage: 'Client-push ingestion source is ready.',
+				},
+				actor,
+				actorIp
+			);
+		}
+
 		const connector = EmailProviderFactory.createConnector(decryptedSource);
 
 		try {
@@ -359,6 +377,21 @@ export class IngestionService {
 		logger.info({ ingestionSourceId: id }, 'Force syncing started.');
 		if (!source) {
 			throw new Error('Ingestion source not found');
+		}
+
+		if (this.returnClientPushIngestions().includes(source.provider)) {
+			await this.update(
+				id,
+				{
+					status: 'active',
+					lastSyncFinishedAt: new Date(),
+					lastSyncStatusMessage:
+						'This ingestion source is client-push; run the local agent to import emails.',
+				},
+				actor,
+				actorIp
+			);
+			return;
 		}
 
 		// Clean up existing jobs for this source to break any stuck flows

@@ -9,6 +9,7 @@ import {
 import { logger } from '../../config/logger';
 import { UserService } from '../../services/UserService';
 import { checkDeletionEnabled } from '../../helpers/deletionGuard';
+import { OutlookComImportService } from '../../services/OutlookComImportService';
 
 export class IngestionController {
 	private userService = new UserService();
@@ -219,6 +220,34 @@ export class IngestionController {
 			console.error(`Trigger force sync for ${req.params.id} error:`, error);
 			if (error instanceof Error && error.message === 'Ingestion source not found') {
 				return res.status(404).json({ message: req.t('ingestion.notFound') });
+			}
+			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
+
+	public checkPushedEmails = async (req: Request, res: Response): Promise<Response> => {
+		try {
+			const { id } = req.params;
+			const result = await OutlookComImportService.checkMessages(id, req.body?.messages);
+			return res.status(200).json(result);
+		} catch (error) {
+			logger.error({ err: error, ingestionSourceId: req.params.id }, 'Outlook COM check error');
+			if (error instanceof Error) {
+				return res.status(400).json({ message: error.message });
+			}
+			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
+
+	public importPushedEmails = async (req: Request, res: Response): Promise<Response> => {
+		try {
+			const { id } = req.params;
+			const result = await OutlookComImportService.importBulk(id, req.body?.messages);
+			return res.status(200).json(result);
+		} catch (error) {
+			logger.error({ err: error, ingestionSourceId: req.params.id }, 'Outlook COM import error');
+			if (error instanceof Error) {
+				return res.status(400).json({ message: error.message });
 			}
 			return res.status(500).json({ message: req.t('errors.internalServerError') });
 		}

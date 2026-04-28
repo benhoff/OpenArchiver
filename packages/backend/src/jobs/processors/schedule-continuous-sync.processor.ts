@@ -1,10 +1,11 @@
 import { Job } from 'bullmq';
 import { db } from '../../database';
 import { ingestionSources } from '../../database/schema';
-import { or, eq } from 'drizzle-orm';
+import { and, or, eq, notInArray } from 'drizzle-orm';
 import { ingestionQueue } from '../queues';
 import { SyncSessionService } from '../../services/SyncSessionService';
 import { logger } from '../../config/logger';
+import type { IngestionProvider } from '@open-archiver/types';
 
 export default async (job: Job) => {
 	logger.info({}, 'Scheduler running: checking for stale sessions and active sources to sync.');
@@ -24,10 +25,22 @@ export default async (job: Job) => {
 	// Step 2: Find all sources with status 'active' or 'error' for continuous syncing.
 	// Sources previously stuck in 'importing'/'syncing' due to a crash will now appear
 	// as 'error' (set by cleanStaleSessions above) and will be picked up here for retry.
+	const nonScheduledProviders: IngestionProvider[] = [
+		'pst_import',
+		'eml_import',
+		'mbox_import',
+		'smtp_journaling',
+		'outlook_com',
+	];
 	const sourcesToSync = await db
 		.select({ id: ingestionSources.id })
 		.from(ingestionSources)
-		.where(or(eq(ingestionSources.status, 'active'), eq(ingestionSources.status, 'error')));
+		.where(
+			and(
+				or(eq(ingestionSources.status, 'active'), eq(ingestionSources.status, 'error')),
+				notInArray(ingestionSources.provider, nonScheduledProviders)
+			)
+		);
 
 	logger.info({ count: sourcesToSync.length }, 'Dispatching continuous-sync jobs for sources');
 

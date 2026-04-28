@@ -8,6 +8,7 @@
     - [Connecting to Google Workspace](user-guides/email-providers/google-workspace.md)
     - [Connecting to a Generic IMAP Server](user-guides/email-providers/imap.md)
     - [Connecting to Microsoft 365](user-guides/email-providers/microsoft-365.md)
+    - [Outlook COM Push Import](user-guides/email-providers/outlook-com.md)
 
 ---
 

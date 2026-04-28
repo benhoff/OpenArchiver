@@ -44,6 +44,7 @@ Password: openarchiver_demo
     - IMAP connection
     - Google Workspace
     - Microsoft 365
+    - Outlook COM Push Import
     - PST files
     - Zipped .eml files
     - Mbox files

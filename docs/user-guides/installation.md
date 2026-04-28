@@ -98,6 +98,7 @@ Here is a complete list of environment variables available for configuration:
 | `APP_URL`               | The public-facing URL of your application. This is used by the backend to configure CORS.                                                                    | `http://localhost:3000` |
 | `ORIGIN`                | Used by the SvelteKit Node adapter to determine the server's public-facing URL. It should always be set to the value of `APP_URL` (e.g., `ORIGIN=$APP_URL`). | `http://localhost:3000` |
 | `SYNC_FREQUENCY`        | The frequency of continuous email syncing. See [cron syntax](https://crontab.guru/) for more details.                                                        | `* * * * *`             |
+| `API_REQUEST_BODY_LIMIT` | Backend JSON request body limit. Increase this if Outlook COM bulk imports include large attachments.                                                        | `50mb`                  |
 | `ALL_INCLUSIVE_ARCHIVE` | Set to `true` to include all emails, including Junk and Trash folders, in the email archive.                                                                 | `false`                 |
 
 #### Docker Compose Service Configuration

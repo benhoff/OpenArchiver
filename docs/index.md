@@ -6,7 +6,7 @@ Welcome to Open Archiver! This guide will help you get started with setting up a
 
 **A secure, sovereign, and affordable open-source platform for email archiving and eDiscovery.**
 
-Open Archiver provides a robust, self-hosted solution for archiving, storing, indexing, and searching emails from major platforms, including Google Workspace (Gmail), Microsoft 365, as well as generic IMAP-enabled email inboxes. Use Open Archiver to keep a permanent, tamper-proof record of your communication history, free from vendor lock-in.
+Open Archiver provides a robust, self-hosted solution for archiving, storing, indexing, and searching emails from major platforms, including Google Workspace (Gmail), Microsoft 365, Outlook COM push imports, as well as generic IMAP-enabled email inboxes. Use Open Archiver to keep a permanent, tamper-proof record of your communication history, free from vendor lock-in.
 
 ## Key Features
 
@@ -29,6 +29,7 @@ After deploying the application, you will need to configure one or more ingestio
 
 - [Connecting to Google Workspace](./user-guides/email-providers/google-workspace.md)
 - [Connecting to Microsoft 365](./user-guides/email-providers/microsoft-365.md)
+- [Outlook COM Push Import](./user-guides/email-providers/outlook-com.md)
 - [Connecting to a Generic IMAP Server](./user-guides/email-providers/imap.md)
 
 ## Contributing

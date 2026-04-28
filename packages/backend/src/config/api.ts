@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 export const apiConfig = {
+	requestBodyLimit: process.env.API_REQUEST_BODY_LIMIT || '50mb',
 	rateLimit: {
 		windowMs: process.env.RATE_LIMIT_WINDOW_MS
 			? parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10)
