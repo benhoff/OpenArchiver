@@ -91,6 +91,24 @@ Daemon mode scans recent mail every `PollSeconds` and runs one daily reconciliat
 
 Use `-ApiBasePath "/api/v1"` if the Windows agent reaches OpenArchiver through the SvelteKit frontend proxy instead of the backend service directly.
 
+## Repair Unknown Senders
+
+If older Outlook COM imports produced `unknown@outlook.local`, update OpenArchiver and rerun the agent in sender-repair mode. This scans Outlook again, matches existing archived rows by Outlook message identifiers, updates only archived emails whose sender is still unknown, and queues those emails for search reindexing.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\outlook-com-importer.ps1 `
+  -OpenArchiverUrl "https://archive.example.com" `
+  -ApiBasePath "/v1" `
+  -SourceId "00000000-0000-0000-0000-000000000000" `
+  -ApiKey "YOUR_API_KEY" `
+  -MailboxEmail "user@example.com" `
+  -Mode RepairSenders `
+  -Folders @("Inbox", "Sent Items") `
+  -BackfillDaysBack 0
+```
+
+Use the same `-Folders`, `-MailboxEmail`, and `-ApiBasePath` values that were used for the original import. `-BackfillDaysBack 0` scans all available messages; set a positive value to repair only recent messages.
+
 ## Duplicate Detection
 
 The agent sends fingerprints first, then uploads only missing messages. OpenArchiver checks:

@@ -7,6 +7,9 @@ import type {
 	OutlookComCheckResponse,
 	OutlookComCheckResult,
 	OutlookComEmailFingerprint,
+	OutlookComSenderRepair,
+	OutlookComSenderRepairResponse,
+	OutlookComSenderRepairResult,
 } from '@open-archiver/types';
 import { db } from '../database';
 import { archivedEmails } from '../database/schema';
@@ -18,6 +21,7 @@ import { logger } from '../config/logger';
 
 const MAX_CHECK_BATCH_SIZE = 1000;
 const MAX_IMPORT_BATCH_SIZE = 100;
+const MAX_SENDER_REPAIR_BATCH_SIZE = 1000;
 
 const fingerprintClientId = (fingerprint: OutlookComEmailFingerprint): string =>
 	fingerprint.clientId ||
@@ -50,6 +54,35 @@ const normalizeFolderPath = (folderPath?: string): string | undefined => {
 		.join('/');
 	return normalized ? `${normalized}/` : undefined;
 };
+
+const normalizeEmailAddress = (email?: string | null): string | undefined => {
+	if (!email) return undefined;
+	const match = email.trim().match(/[a-z0-9._%+\-']+@[a-z0-9.\-]+\.[a-z]{2,}/i);
+	return match?.[0];
+};
+
+const mailboxEmailFromFolderPath = (folderPath?: string): string | undefined => {
+	if (!folderPath) return undefined;
+	return folderPath
+		.replaceAll('\\', '/')
+		.split('/')
+		.map((segment) => normalizeEmailAddress(segment))
+		.find((email): email is string => !!email);
+};
+
+const isOutlookComSentFolder = (folderPath?: string): boolean => {
+	if (!folderPath) return false;
+	const normalized = folderPath.replaceAll('\\', '/').toLowerCase();
+	return /(^|\/)(sent|sent items|sent mail|outbox|drafts)(\/|$)/.test(normalized);
+};
+
+const isOutlookComSentMessage = (message: OutlookComBulkEmail): boolean =>
+	(message.tags || []).some(
+		(tag) => tag === 'outlook-direction:sent' || tag === 'outlook-direction:outgoing'
+	) || isOutlookComSentFolder(message.folderPath);
+
+const isUnknownOutlookSender = (email?: string): boolean =>
+	!email || email.toLowerCase() === 'unknown@outlook.local' || email === 'No Sender';
 
 const normalizeProviderIdForStorage = (providerId?: string): string | undefined => {
 	if (!providerId) return undefined;
@@ -266,16 +299,30 @@ export class OutlookComImportService {
 
 				parsedForMessageId.id =
 					normalizeProviderIdForStorage(providerId) || parsedForMessageId.id;
-				const userEmail =
-					message.mailboxEmail ||
+				const mailboxEmail =
+					normalizeEmailAddress(message.mailboxEmail) ||
 					(source.credentials.type === 'outlook_com'
-						? source.credentials.mailboxEmail
+						? normalizeEmailAddress(source.credentials.mailboxEmail)
 						: undefined) ||
+					mailboxEmailFromFolderPath(message.folderPath);
+				const userEmail =
+					mailboxEmail ||
 					parsedForMessageId.userEmail ||
 					'outlook-com.local';
 				parsedForMessageId.userEmail = userEmail;
 				parsedForMessageId.path = normalizeFolderPath(message.folderPath);
 				parsedForMessageId.tags = message.tags;
+				if (
+					mailboxEmail &&
+					isOutlookComSentMessage(message) &&
+					isUnknownOutlookSender(parsedForMessageId.from[0]?.address)
+				) {
+					const currentFrom = parsedForMessageId.from[0];
+					parsedForMessageId.from[0] = {
+						name: currentFrom?.name || '',
+						address: mailboxEmail,
+					};
+				}
 
 				const processed = await ingestionService.processEmail(
 					parsedForMessageId,
@@ -315,5 +362,169 @@ export class OutlookComImportService {
 		});
 
 		return { imported, existing, failed, results };
+	}
+
+	public static async repairSenders(
+		ingestionSourceId: string,
+		messages: OutlookComSenderRepair[]
+	): Promise<OutlookComSenderRepairResponse> {
+		if (!Array.isArray(messages)) {
+			throw new Error('messages must be an array.');
+		}
+		if (messages.length > MAX_SENDER_REPAIR_BATCH_SIZE) {
+			throw new Error(`messages cannot contain more than ${MAX_SENDER_REPAIR_BATCH_SIZE} items.`);
+		}
+
+		const source = await IngestionService.findById(ingestionSourceId);
+		if (source.provider !== 'outlook_com') {
+			throw new Error('This endpoint only accepts outlook_com ingestion sources.');
+		}
+
+		const groupIds = await IngestionService.findGroupSourceIds(ingestionSourceId);
+		const sourceFilter =
+			groupIds.length === 1
+				? eq(archivedEmails.ingestionSourceId, groupIds[0])
+				: inArray(archivedEmails.ingestionSourceId, groupIds);
+
+		const providerIds = new Set<string>();
+		const messageIds = new Set<string>();
+
+		for (const message of messages) {
+			if (message.providerMessageId) providerIds.add(message.providerMessageId);
+			const rawOutlookProviderId = outlookProviderIdFromRawIds(message);
+			if (rawOutlookProviderId) providerIds.add(rawOutlookProviderId);
+			for (const candidate of normalizeMessageIdCandidates(
+				message.internetMessageId || message.messageIdHeader
+			)) {
+				messageIds.add(candidate);
+			}
+		}
+
+		const matchConditions: SQL[] = [];
+		if (providerIds.size > 0) {
+			matchConditions.push(inArray(archivedEmails.providerMessageId, Array.from(providerIds)));
+		}
+		if (messageIds.size > 0) {
+			matchConditions.push(inArray(archivedEmails.messageIdHeader, Array.from(messageIds)));
+		}
+
+		const archived =
+			matchConditions.length === 0
+				? []
+				: await db
+						.select({
+							id: archivedEmails.id,
+							providerMessageId: archivedEmails.providerMessageId,
+							messageIdHeader: archivedEmails.messageIdHeader,
+							senderEmail: archivedEmails.senderEmail,
+						})
+						.from(archivedEmails)
+						.where(and(sourceFilter, or(...matchConditions)));
+
+		const byProviderId = new Map<string, (typeof archived)[number]>();
+		const byMessageId = new Map<string, (typeof archived)[number]>();
+
+		for (const email of archived) {
+			if (email.providerMessageId) byProviderId.set(email.providerMessageId, email);
+			if (email.messageIdHeader) {
+				for (const candidate of normalizeMessageIdCandidates(email.messageIdHeader)) {
+					byMessageId.set(candidate, email);
+				}
+			}
+		}
+
+		const results: OutlookComSenderRepairResult[] = [];
+		const repairedIds: string[] = [];
+		let repaired = 0;
+		let skipped = 0;
+		let notFound = 0;
+		let failed = 0;
+
+		for (const message of messages) {
+			const clientId = fingerprintClientId(message);
+			try {
+				const providerCandidates = [
+					message.providerMessageId,
+					outlookProviderIdFromRawIds(message) || undefined,
+				].filter((candidate): candidate is string => !!candidate);
+				const messageCandidates = normalizeMessageIdCandidates(
+					message.internetMessageId || message.messageIdHeader
+				);
+
+				const providerMatch = providerCandidates
+					.map((candidate) => byProviderId.get(candidate))
+					.find((email): email is (typeof archived)[number] => !!email);
+				const messageMatch = messageCandidates
+					.map((candidate) => byMessageId.get(candidate))
+					.find((email): email is (typeof archived)[number] => !!email);
+				const archivedEmail = providerMatch || messageMatch;
+
+				if (!archivedEmail) {
+					results.push({ clientId, status: 'not_found' });
+					notFound += 1;
+					continue;
+				}
+
+				const senderEmail = normalizeEmailAddress(message.senderEmail);
+				if (!senderEmail || isUnknownOutlookSender(senderEmail)) {
+					results.push({
+						clientId,
+						status: 'skipped',
+						archivedEmailId: archivedEmail.id,
+						message: 'No repaired SMTP sender address was supplied.',
+					});
+					skipped += 1;
+					continue;
+				}
+
+				if (!isUnknownOutlookSender(archivedEmail.senderEmail)) {
+					results.push({
+						clientId,
+						status: 'skipped',
+						archivedEmailId: archivedEmail.id,
+						message: 'Archived sender is already populated.',
+					});
+					skipped += 1;
+					continue;
+				}
+
+				await db
+					.update(archivedEmails)
+					.set({
+						senderName: message.senderName || null,
+						senderEmail,
+					})
+					.where(eq(archivedEmails.id, archivedEmail.id));
+
+				repairedIds.push(archivedEmail.id);
+				results.push({
+					clientId,
+					status: 'repaired',
+					archivedEmailId: archivedEmail.id,
+				});
+				repaired += 1;
+			} catch (error) {
+				results.push({
+					clientId,
+					status: 'failed',
+					message: error instanceof Error ? error.message : String(error),
+				});
+				failed += 1;
+			}
+		}
+
+		if (repairedIds.length > 0) {
+			await indexingQueue.add('index-email-batch', {
+				emails: repairedIds.map((archivedEmailId) => ({ archivedEmailId })),
+			});
+		}
+
+		return {
+			repaired,
+			skipped,
+			notFound,
+			failed,
+			results,
+		};
 	}
 }

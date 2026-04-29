@@ -252,4 +252,21 @@ export class IngestionController {
 			return res.status(500).json({ message: req.t('errors.internalServerError') });
 		}
 	};
+
+	public repairPushedEmailSenders = async (req: Request, res: Response): Promise<Response> => {
+		try {
+			const { id } = req.params;
+			const result = await OutlookComImportService.repairSenders(id, req.body?.messages);
+			return res.status(200).json(result);
+		} catch (error) {
+			logger.error(
+				{ err: error, ingestionSourceId: req.params.id },
+				'Outlook COM sender repair error'
+			);
+			if (error instanceof Error) {
+				return res.status(400).json({ message: error.message });
+			}
+			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
 }

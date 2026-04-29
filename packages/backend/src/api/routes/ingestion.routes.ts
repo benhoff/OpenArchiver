@@ -331,6 +331,25 @@ export const createIngestionRouter = (
 
 	/**
 	 * @openapi
+	 * /v1/ingestion-sources/{id}/emails/repair-senders:
+	 *   post:
+	 *     summary: Repair pushed Outlook COM sender metadata
+	 *     description: Updates existing Outlook COM emails whose sender is unknown by matching Outlook message identifiers from a local repair scan. Requires `sync:ingestion` permission.
+	 *     operationId: repairPushedEmailSenders
+	 *     tags:
+	 *       - Ingestion
+	 *     security:
+	 *       - bearerAuth: []
+	 *       - apiKeyAuth: []
+	 */
+	router.post(
+		'/:id/emails/repair-senders',
+		requirePermission('sync', 'ingestion'),
+		ingestionController.repairPushedEmailSenders
+	);
+
+	/**
+	 * @openapi
 	 * /v1/ingestion-sources/{id}/unmerge:
 	 *   post:
 	 *     summary: Unmerge a child ingestion source

@@ -7,6 +7,7 @@
     - Backfill: scan selected folders and upload missing messages.
     - Reconcile: scan selected folders on demand, typically from Task Scheduler.
     - Daemon: periodic recent scans plus one daily reconciliation scan.
+    - RepairSenders: scan selected folders and repair existing unknown sender metadata.
 
     Requires classic Outlook for Windows. New Outlook does not expose the COM object model.
 #>
@@ -24,7 +25,7 @@ param(
 
     [string]$ApiBasePath = "/v1",
 
-    [ValidateSet("Backfill", "Reconcile", "Daemon")]
+    [ValidateSet("Backfill", "Reconcile", "Daemon", "RepairSenders")]
     [string]$Mode = "Daemon",
 
     [string[]]$Folders = @("Inbox", "Sent Items"),
@@ -165,7 +166,30 @@ function Normalize-EmailAddress {
     param([string]$Email)
     if ([string]::IsNullOrWhiteSpace($Email)) { return $null }
     $normalized = "$Email".Trim()
+
+    if ($normalized.StartsWith("SMTP:", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $normalized = $normalized.Substring(5).Trim()
+    }
+
+    if ($normalized -match "<([^<>@\s]+@[^<>\s]+)>") { return $matches[1] }
+    if ($normalized -match "(?i)([a-z0-9._%+\-']+@[a-z0-9.\-]+\.[a-z]{2,})") { return $matches[1] }
     if ($normalized -match "@") { return $normalized }
+    return $null
+}
+
+function Get-MailboxEmailFallback {
+    param([string]$FolderPath)
+
+    $email = Normalize-EmailAddress $MailboxEmail
+    if ($email) { return $email }
+
+    if (-not [string]::IsNullOrWhiteSpace($FolderPath)) {
+        foreach ($segment in ("$FolderPath" -replace "\\", "/").Split("/")) {
+            $email = Normalize-EmailAddress $segment
+            if ($email) { return $email }
+        }
+    }
+
     return $null
 }
 
@@ -189,6 +213,19 @@ function Get-SmtpFromAddressEntry {
         }
     } catch {}
 
+    $addressEntryProperties = @(
+        "http://schemas.microsoft.com/mapi/proptag/0x39FE001F", # PR_SMTP_ADDRESS
+        "http://schemas.microsoft.com/mapi/proptag/0x39FE001E",
+        "http://schemas.microsoft.com/mapi/proptag/0x3003001F", # PR_EMAIL_ADDRESS
+        "http://schemas.microsoft.com/mapi/proptag/0x3003001E"
+    )
+    foreach ($propertyName in $addressEntryProperties) {
+        try {
+            $email = Normalize-EmailAddress "$($AddressEntry.PropertyAccessor.GetProperty($propertyName))"
+            if ($email) { return $email }
+        } catch {}
+    }
+
     try {
         $email = Normalize-EmailAddress "$($AddressEntry.Address)"
         if ($email) { return $email }
@@ -197,8 +234,38 @@ function Get-SmtpFromAddressEntry {
     return $null
 }
 
-function Get-SenderAddress {
+function Get-SmtpFromMailItemProperties {
     param($MailItem)
+
+    $mailItemProperties = @(
+        "http://schemas.microsoft.com/mapi/proptag/0x5D02001F", # PR_SENT_REPRESENTING_SMTP_ADDRESS
+        "http://schemas.microsoft.com/mapi/proptag/0x5D02001E",
+        "http://schemas.microsoft.com/mapi/proptag/0x5D01001F", # PR_SENDER_SMTP_ADDRESS
+        "http://schemas.microsoft.com/mapi/proptag/0x5D01001E",
+        "http://schemas.microsoft.com/mapi/proptag/0x0065001F", # PR_SENT_REPRESENTING_EMAIL_ADDRESS
+        "http://schemas.microsoft.com/mapi/proptag/0x0065001E",
+        "http://schemas.microsoft.com/mapi/proptag/0x0C1F001F", # PR_SENDER_EMAIL_ADDRESS
+        "http://schemas.microsoft.com/mapi/proptag/0x0C1F001E"
+    )
+
+    foreach ($propertyName in $mailItemProperties) {
+        $email = Normalize-EmailAddress (Get-PropSafe -Item $MailItem -DaslName $propertyName)
+        if ($email) { return $email }
+    }
+
+    return $null
+}
+
+function Get-SenderAddress {
+    param(
+        $MailItem,
+        [string]$FallbackEmail = ""
+    )
+
+    try {
+        $email = Get-SmtpFromMailItemProperties $MailItem
+        if ($email) { return $email }
+    } catch {}
 
     try {
         $sender = $MailItem.Sender
@@ -212,6 +279,16 @@ function Get-SenderAddress {
         $email = Normalize-EmailAddress "$($MailItem.SenderEmailAddress)"
         if ($email) { return $email }
     } catch {}
+
+    try {
+        if ($MailItem.SendUsingAccount) {
+            $email = Normalize-EmailAddress "$($MailItem.SendUsingAccount.SmtpAddress)"
+            if ($email) { return $email }
+        }
+    } catch {}
+
+    $email = Normalize-EmailAddress $FallbackEmail
+    if ($email) { return $email }
 
     return "unknown@outlook.local"
 }
@@ -381,7 +458,8 @@ function New-GeneratedEmlBytes {
     param(
         [Parameter(Mandatory = $true)]$MailItem,
         [Parameter(Mandatory = $true)][string]$ClientId,
-        [string]$Direction = "received"
+        [string]$Direction = "received",
+        [string]$FolderPath = ""
     )
 
     $messageId = Get-InternetMessageId $MailItem
@@ -396,7 +474,11 @@ function New-GeneratedEmlBytes {
 
     $senderName = ""
     try { $senderName = "$($MailItem.SenderName)" } catch {}
-    $senderEmail = Get-SenderAddress $MailItem
+    $fallbackSenderEmail = ""
+    if ($Direction -eq "sent" -or $Direction -eq "outgoing") {
+        $fallbackSenderEmail = Get-MailboxEmailFallback -FolderPath $FolderPath
+    }
+    $senderEmail = Get-SenderAddress -MailItem $MailItem -FallbackEmail $fallbackSenderEmail
     $from = Format-Mailbox -Name $senderName -Email $senderEmail
 
     $to = Get-RecipientHeader -MailItem $MailItem -RecipientType 1
@@ -626,7 +708,7 @@ function Submit-PendingBatch {
 
         try {
             $direction = "$($entry.direction)"
-            $emlBytes = New-GeneratedEmlBytes -MailItem $entry.item -ClientId $clientId -Direction $direction
+            $emlBytes = New-GeneratedEmlBytes -MailItem $entry.item -ClientId $clientId -Direction $direction -FolderPath $entry.folderPath
             $contentHash = Get-Sha256Hex $emlBytes
 
             $uploadMessages += [ordered]@{
@@ -665,6 +747,57 @@ function Submit-PendingBatch {
     }
 
     return @{ imported = $importedCount; existing = $existingCount; failed = $failedCount }
+}
+
+function Submit-SenderRepairBatch {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Pending
+    )
+
+    if ($Pending.Count -eq 0) { return @{ repaired = 0; skipped = 0; notFound = 0; failed = 0 } }
+
+    $repairMessages = @()
+    foreach ($entry in $Pending) {
+        try {
+            $fingerprint = $entry.fingerprint
+            $direction = "$($entry.direction)"
+            $fallbackSenderEmail = ""
+            if ($direction -eq "sent" -or $direction -eq "outgoing") {
+                $fallbackSenderEmail = Get-MailboxEmailFallback -FolderPath $entry.folderPath
+            }
+
+            $senderName = ""
+            try { $senderName = "$($entry.item.SenderName)" } catch {}
+            $senderEmail = Get-SenderAddress -MailItem $entry.item -FallbackEmail $fallbackSenderEmail
+
+            $repairMessages += [ordered]@{
+                clientId = $fingerprint.clientId
+                providerMessageId = $fingerprint.providerMessageId
+                internetMessageId = $fingerprint.internetMessageId
+                outlookEntryId = $fingerprint.outlookEntryId
+                storeId = $fingerprint.storeId
+                senderName = $senderName
+                senderEmail = $senderEmail
+                mailboxEmail = $MailboxEmail
+                folderPath = $entry.folderPath
+                tags = @("outlook-com", "outlook-direction:$direction", "outlook-sender-repair")
+            }
+        } catch {
+            Write-Log "Failed to prepare sender repair message: $($_.Exception.Message)" "ERROR"
+        }
+    }
+
+    if ($repairMessages.Count -eq 0) { return @{ repaired = 0; skipped = 0; notFound = 0; failed = $Pending.Count } }
+
+    $response = Invoke-OpenArchiverJson -Path "/emails/repair-senders" -Body @{ messages = $repairMessages }
+    Write-Log "Sender repair batch: repaired=$($response.repaired) skipped=$($response.skipped) notFound=$($response.notFound) failed=$($response.failed)"
+
+    return @{
+        repaired = [int]$response.repaired
+        skipped = [int]$response.skipped
+        notFound = [int]$response.notFound
+        failed = [int]$response.failed
+    }
 }
 
 function Invoke-MailScan {
@@ -745,10 +878,94 @@ function Invoke-MailScan {
     Write-Log "$ScanName scan complete. seen=$totalSeen imported=$totalImported existing=$totalExisting failed=$totalFailed"
 }
 
+function Invoke-SenderRepairScan {
+    param(
+        [Parameter(Mandatory = $true)][int]$DaysBack,
+        [Parameter(Mandatory = $true)][string]$ScanName
+    )
+
+    if (-not (Ensure-OutlookCom)) { return }
+
+    Write-Log "Starting $ScanName sender repair scan. daysBack=$DaysBack folders=$($Folders -join ', ')"
+    $totalSeen = 0
+    $totalRepaired = 0
+    $totalSkipped = 0
+    $totalNotFound = 0
+    $totalFailed = 0
+    $pending = @()
+
+    foreach ($folderName in $Folders) {
+        $folder = Resolve-OutlookFolder $folderName
+        if (-not $folder) {
+            Write-Log "Folder not found: $folderName" "WARN"
+            continue
+        }
+
+        foreach ($scanFolder in (Get-FolderAndChildren -Folder $folder)) {
+            $folderPath = Get-FolderPath $scanFolder
+            Write-Log "Scanning folder for sender repair: $folderPath"
+
+            $items = $null
+            try {
+                $items = $scanFolder.Items
+                try { $items.Sort("[ReceivedTime]", $true) } catch {}
+            } catch {
+                Write-Log "Unable to read folder items for ${folderPath}: $($_.Exception.Message)" "WARN"
+                continue
+            }
+
+            foreach ($item in $items) {
+                if ($MaxMessages -gt 0 -and $totalSeen -ge $MaxMessages) { break }
+
+                try {
+                    $messageClass = "$($item.MessageClass)"
+                    if (-not $messageClass.StartsWith("IPM.Note")) { continue }
+                    $direction = Get-MailDirection -FolderPath $folderPath -MailItem $item
+                    if (-not (Test-MailItemInWindow -MailItem $item -DaysBack $DaysBack -Direction $direction)) { continue }
+
+                    $fingerprint = Get-MailFingerprint -MailItem $item -Direction $direction
+                    $pending += [ordered]@{
+                        item = $item
+                        fingerprint = $fingerprint
+                        folderPath = $folderPath
+                        direction = $direction
+                    }
+                    $totalSeen += 1
+
+                    if ($pending.Count -ge $CheckBatchSize) {
+                        $result = Submit-SenderRepairBatch -Pending $pending
+                        $totalRepaired += [int]$result.repaired
+                        $totalSkipped += [int]$result.skipped
+                        $totalNotFound += [int]$result.notFound
+                        $totalFailed += [int]$result.failed
+                        $pending = @()
+                    }
+                } catch {
+                    $totalFailed += 1
+                    Write-Log "Skipping sender repair message due to error: $($_.Exception.Message)" "WARN"
+                }
+            }
+        }
+    }
+
+    if ($pending.Count -gt 0) {
+        $result = Submit-SenderRepairBatch -Pending $pending
+        $totalRepaired += [int]$result.repaired
+        $totalSkipped += [int]$result.skipped
+        $totalNotFound += [int]$result.notFound
+        $totalFailed += [int]$result.failed
+    }
+
+    Write-Log "$ScanName sender repair scan complete. seen=$totalSeen repaired=$totalRepaired skipped=$totalSkipped notFound=$totalNotFound failed=$totalFailed"
+}
+
 Write-Log "OpenArchiver Outlook COM importer starting. mode=$Mode url=$script:BaseUrl source=$SourceId"
 
 try {
     switch ($Mode) {
+        "RepairSenders" {
+            Invoke-SenderRepairScan -DaysBack $BackfillDaysBack -ScanName "sender-repair"
+        }
         "Backfill" {
             Invoke-MailScan -DaysBack $BackfillDaysBack -ScanName "backfill"
         }

@@ -247,6 +247,37 @@ export interface OutlookComBulkRequest {
 	messages: OutlookComBulkEmail[];
 }
 
+export interface OutlookComSenderRepair extends OutlookComEmailFingerprint {
+	/** Sender display name read from Outlook during the repair scan. */
+	senderName?: string;
+	/** SMTP sender address read from Outlook during the repair scan. */
+	senderEmail?: string;
+	/** Mailbox/account represented by this Outlook profile or folder. */
+	mailboxEmail?: string;
+	/** Outlook folder path, e.g. Inbox/Subfolder or Sent Items. */
+	folderPath?: string;
+	tags?: string[];
+}
+
+export interface OutlookComSenderRepairRequest {
+	messages: OutlookComSenderRepair[];
+}
+
+export interface OutlookComSenderRepairResult {
+	clientId: string;
+	status: 'repaired' | 'skipped' | 'not_found' | 'failed';
+	archivedEmailId?: string;
+	message?: string;
+}
+
+export interface OutlookComSenderRepairResponse {
+	repaired: number;
+	skipped: number;
+	notFound: number;
+	failed: number;
+	results: OutlookComSenderRepairResult[];
+}
+
 export interface OutlookComBulkImportResult {
 	clientId: string;
 	status: 'imported' | 'existing' | 'failed';
