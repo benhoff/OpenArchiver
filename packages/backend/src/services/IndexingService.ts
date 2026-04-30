@@ -60,6 +60,19 @@ function sanitizeObject<T>(obj: T): T {
 	return obj;
 }
 
+function extractDomain(email: string | undefined): string {
+	const [, domain = ''] = (email || '').toLowerCase().split('@');
+	return domain.trim();
+}
+
+function normalizeEmail(email: string | undefined): string {
+	return (email || '').trim().toLowerCase();
+}
+
+function uniqueDomains(emails: string[]): string[] {
+	return Array.from(new Set(emails.map(extractDomain).filter(Boolean)));
+}
+
 export class IndexingService {
 	private dbService: DatabaseService;
 	private searchService: SearchService;
@@ -365,13 +378,29 @@ export class IndexingService {
 		return {
 			id: archivedEmailId,
 			userEmail: userEmail,
-			from: email.from[0]?.address,
-			to: email.to.map((i: EmailAddress) => i.address) || [],
-			cc: email.cc?.map((i: EmailAddress) => i.address) || [],
-			bcc: email.bcc?.map((i: EmailAddress) => i.address) || [],
+			from: normalizeEmail(email.from[0]?.address || ''),
+			fromDomain: extractDomain(email.from[0]?.address),
+			to: email.to.map((i: EmailAddress) => normalizeEmail(i.address)) || [],
+			toDomains: uniqueDomains(email.to?.map((i: EmailAddress) => i.address) || []),
+			cc: email.cc?.map((i: EmailAddress) => normalizeEmail(i.address)) || [],
+			ccDomains: uniqueDomains(email.cc?.map((i: EmailAddress) => i.address) || []),
+			bcc: email.bcc?.map((i: EmailAddress) => normalizeEmail(i.address)) || [],
+			bccDomains: uniqueDomains(email.bcc?.map((i: EmailAddress) => i.address) || []),
+			recipientDomains: uniqueDomains([
+				...(email.to?.map((i: EmailAddress) => i.address) || []),
+				...(email.cc?.map((i: EmailAddress) => i.address) || []),
+				...(email.bcc?.map((i: EmailAddress) => i.address) || []),
+			]),
+			participantDomains: uniqueDomains([
+				email.from[0]?.address || '',
+				...(email.to?.map((i: EmailAddress) => i.address) || []),
+				...(email.cc?.map((i: EmailAddress) => i.address) || []),
+				...(email.bcc?.map((i: EmailAddress) => i.address) || []),
+			]),
 			subject: email.subject || '',
 			body: email.body || email.html || '',
 			attachments: extractedAttachments,
+			hasAttachments: attachments.length > 0,
 			timestamp: new Date(email.receivedAt).getTime(),
 			ingestionSourceId: ingestionSourceId,
 		};
@@ -406,17 +435,32 @@ export class IndexingService {
 		}
 
 		const recipients = email.recipients as DbRecipients;
+		const toEmails = recipients.to?.map((r) => normalizeEmail(r.address)) || [];
+		const ccEmails = recipients.cc?.map((r) => normalizeEmail(r.address)) || [];
+		const bccEmails = recipients.bcc?.map((r) => normalizeEmail(r.address)) || [];
 		// console.log('email.userEmail', email.userEmail);
 		return {
 			id: email.id,
 			userEmail: userEmail,
-			from: email.senderEmail,
-			to: recipients.to?.map((r) => r.address) || [],
-			cc: recipients.cc?.map((r) => r.address) || [],
-			bcc: recipients.bcc?.map((r) => r.address) || [],
+			from: normalizeEmail(email.senderEmail),
+			fromDomain: extractDomain(email.senderEmail),
+			to: toEmails,
+			toDomains: uniqueDomains(toEmails),
+			cc: ccEmails,
+			ccDomains: uniqueDomains(ccEmails),
+			bcc: bccEmails,
+			bccDomains: uniqueDomains(bccEmails),
+			recipientDomains: uniqueDomains([...toEmails, ...ccEmails, ...bccEmails]),
+			participantDomains: uniqueDomains([
+				email.senderEmail,
+				...toEmails,
+				...ccEmails,
+				...bccEmails,
+			]),
 			subject: email.subject || '',
 			body: emailBodyText,
 			attachments: attachmentContents,
+			hasAttachments: email.hasAttachments,
 			timestamp: new Date(email.sentAt).getTime(),
 			ingestionSourceId: email.ingestionSourceId,
 		};
@@ -534,13 +578,42 @@ export class IndexingService {
 		return {
 			id: doc.id || 'missing-id',
 			userEmail: doc.userEmail || 'unknown',
-			from: doc.from || '',
-			to: Array.isArray(doc.to) ? doc.to : [],
-			cc: Array.isArray(doc.cc) ? doc.cc : [],
-			bcc: Array.isArray(doc.bcc) ? doc.bcc : [],
+			from: normalizeEmail(doc.from),
+			fromDomain: doc.fromDomain ? normalizeEmail(doc.fromDomain) : extractDomain(doc.from),
+			to: Array.isArray(doc.to) ? doc.to.map(normalizeEmail) : [],
+			toDomains: Array.isArray(doc.toDomains)
+				? doc.toDomains.map(normalizeEmail)
+				: uniqueDomains(Array.isArray(doc.to) ? doc.to : []),
+			cc: Array.isArray(doc.cc) ? doc.cc.map(normalizeEmail) : [],
+			ccDomains: Array.isArray(doc.ccDomains)
+				? doc.ccDomains.map(normalizeEmail)
+				: uniqueDomains(Array.isArray(doc.cc) ? doc.cc : []),
+			bcc: Array.isArray(doc.bcc) ? doc.bcc.map(normalizeEmail) : [],
+			bccDomains: Array.isArray(doc.bccDomains)
+				? doc.bccDomains.map(normalizeEmail)
+				: uniqueDomains(Array.isArray(doc.bcc) ? doc.bcc : []),
+			recipientDomains: Array.isArray(doc.recipientDomains)
+				? doc.recipientDomains.map(normalizeEmail)
+				: uniqueDomains([
+						...(Array.isArray(doc.to) ? doc.to : []),
+						...(Array.isArray(doc.cc) ? doc.cc : []),
+						...(Array.isArray(doc.bcc) ? doc.bcc : []),
+					]),
+			participantDomains: Array.isArray(doc.participantDomains)
+				? doc.participantDomains.map(normalizeEmail)
+				: uniqueDomains([
+						doc.from || '',
+						...(Array.isArray(doc.to) ? doc.to : []),
+						...(Array.isArray(doc.cc) ? doc.cc : []),
+						...(Array.isArray(doc.bcc) ? doc.bcc : []),
+					]),
 			subject: doc.subject || '',
 			body: doc.body || '',
 			attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+			hasAttachments:
+				typeof doc.hasAttachments === 'boolean'
+					? doc.hasAttachments
+					: Array.isArray(doc.attachments) && doc.attachments.length > 0,
 			timestamp: typeof doc.timestamp === 'number' ? doc.timestamp : Date.now(),
 			ingestionSourceId: doc.ingestionSourceId || 'unknown',
 		};

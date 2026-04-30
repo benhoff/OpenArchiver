@@ -74,15 +74,22 @@ export interface EmailDocument {
 	id: string; // The unique ID of the email
 	userEmail: string;
 	from: string;
+	fromDomain: string;
 	to: string[];
+	toDomains: string[];
 	cc: string[];
+	ccDomains: string[];
 	bcc: string[];
+	bccDomains: string[];
+	recipientDomains: string[];
+	participantDomains: string[];
 	subject: string;
 	body: string;
 	attachments: {
 		filename: string;
 		content: string; // Extracted text from the attachment
 	}[];
+	hasAttachments: boolean;
 	timestamp: number;
 	ingestionSourceId: string;
 	// other metadata

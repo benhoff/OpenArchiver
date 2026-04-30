@@ -15,8 +15,15 @@ async function performSearch(
 	}
 
 	try {
+		const params = new URLSearchParams({
+			keywords,
+			page: String(page),
+			limit: '10',
+			matchingStrategy,
+		});
+
 		const response = await api(
-			`/search?keywords=${keywords}&page=${page}&limit=10&matchingStrategy=${matchingStrategy}`,
+			`/search?${params.toString()}`,
 			event,
 			{
 				method: 'GET',
