@@ -30,9 +30,11 @@ import { FilterBuilder } from './FilterBuilder';
 import { AuditService } from './AuditService';
 import { User } from '@open-archiver/types';
 import { checkDeletionEnabled } from '../helpers/deletionGuard';
+import { CalendarEventService } from './CalendarEventService';
 
 export class IngestionService {
 	private static auditService = new AuditService();
+	private calendarEventService = new CalendarEventService();
 	private static decryptSource(
 		source: typeof ingestionSources.$inferSelect
 	): IngestionSource | null {
@@ -556,6 +558,33 @@ export class IngestionService {
 		return !!existingEmail;
 	}
 
+	private async parseCalendarEventsFromEmail(
+		archivedEmail: typeof archivedEmails.$inferSelect,
+		rawEmlBuffer: Buffer
+	): Promise<void> {
+		try {
+			const result = await this.calendarEventService.parseAndUpsertFromEmail(
+				archivedEmail,
+				rawEmlBuffer
+			);
+			if (result.parsedEvents > 0) {
+				logger.info(
+					{
+						archivedEmailId: archivedEmail.id,
+						parsedEvents: result.parsedEvents,
+						upsertedEvents: result.upsertedEvents,
+					},
+					'Parsed calendar events from archived email.'
+				);
+			}
+		} catch (error) {
+			logger.warn(
+				{ err: error, archivedEmailId: archivedEmail.id },
+				'Failed to parse calendar events from archived email.'
+			);
+		}
+	}
+
 	public async processEmail(
 		email: EmailObject,
 		source: IngestionSource,
@@ -667,6 +696,8 @@ export class IngestionService {
 					})
 					.returning();
 
+				await this.parseCalendarEventsFromEmail(archivedEmail, rawEmlBuffer);
+
 				return {
 					archivedEmailId: archivedEmail.id,
 				};
@@ -704,6 +735,8 @@ export class IngestionService {
 					tags: email.tags,
 				})
 				.returning();
+
+			await this.parseCalendarEventsFromEmail(archivedEmail, rawEmlBuffer);
 
 			if (email.attachments.length > 0) {
 				for (const attachment of email.attachments) {

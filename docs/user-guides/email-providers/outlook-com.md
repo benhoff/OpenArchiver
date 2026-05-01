@@ -38,7 +38,8 @@ Keep the returned source ID. The PowerShell agent needs it.
 ## Backfill
 
 Run this once to import historical mail. `-BackfillDaysBack 0` scans all available messages in the selected folders.
-Subfolders are included by default; pass `-IncludeSubfolders $false` to limit the scan to only the named folders.
+Subfolders are included by default; pass `-IncludeSubfolders false` or `-IncludeSubfolders:$false` to limit the scan to only the named folders.
+The importer also captures Outlook meeting requests and appointment items. Meeting items are archived with an `outlook-message-class:*` tag and, when Outlook exposes the associated appointment, a generated `invite.ics` calendar part.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\outlook-com-importer.ps1 `
@@ -50,6 +51,40 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\outlook-com-importer.
   -Mode Backfill `
   -Folders @("Inbox", "Sent Items") `
   -BackfillDaysBack 0
+```
+
+To backfill calendar invites and existing Outlook calendar appointments, include the Calendar folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\outlook-com-importer.ps1 `
+  -OpenArchiverUrl "https://archive.example.com" `
+  -ApiBasePath "/v1" `
+  -SourceId "00000000-0000-0000-0000-000000000000" `
+  -ApiKey "YOUR_API_KEY" `
+  -MailboxEmail "user@example.com" `
+  -Mode Backfill `
+  -Folders @("Inbox", "Sent Items", "Calendar") `
+  -BackfillDaysBack 0
+```
+
+After importing older invite mail or Calendar items, ask OpenArchiver to parse stored EML files into canonical calendar event rows:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://archive.example.com/v1/calendar-events/backfill" `
+  -Headers @{ "X-API-Key" = "YOUR_API_KEY" } `
+  -ContentType "application/json" `
+  -Body '{ "limit": 20000, "sourceId": "00000000-0000-0000-0000-000000000000" }'
+```
+
+Then query double-bookings for a window:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "https://archive.example.com/v1/calendar-events/conflicts?from=2026-05-01T00:00:00Z&to=2026-11-01T00:00:00Z&excludeDeclined=true&includeTentative=true" `
+  -Headers @{ "X-API-Key" = "YOUR_API_KEY" }
 ```
 
 ## Daily Reconciliation

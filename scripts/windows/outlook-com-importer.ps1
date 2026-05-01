@@ -8,6 +8,7 @@
     - Reconcile: scan selected folders on demand, typically from Task Scheduler.
     - Daemon: periodic recent scans plus one daily reconciliation scan.
     - RepairSenders: scan selected folders and repair existing unknown sender metadata.
+    - Meeting requests and calendar appointments: imports Outlook meeting items and adds a generated .ics part when Outlook exposes appointment details.
 
     Requires classic Outlook for Windows. New Outlook does not expose the COM object model.
 #>
@@ -29,7 +30,7 @@ param(
     [string]$Mode = "Daemon",
 
     [string[]]$Folders = @("Inbox", "Sent Items"),
-    [bool]$IncludeSubfolders = $true,
+    $IncludeSubfolders = $true,
 
     # 0 means all available messages. Use with care on large mailboxes.
     [int]$BackfillDaysBack = 0,
@@ -48,6 +49,35 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
+
+function ConvertTo-BooleanOption {
+    param(
+        $Value,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [bool]$Default = $true
+    )
+
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return $Value }
+
+    $text = "$Value".Trim()
+    if ($text.StartsWith('$')) {
+        $text = $text.Substring(1)
+    }
+
+    switch -Regex ($text.ToLowerInvariant()) {
+        '^(1|true|t|yes|y|on)$' { return $true }
+        '^(0|false|f|no|n|off)$' { return $false }
+        default {
+            throw "$Name must be true or false. Received: $Value"
+        }
+    }
+}
+
+$IncludeSubfolders = ConvertTo-BooleanOption `
+    -Value $IncludeSubfolders `
+    -Name "IncludeSubfolders" `
+    -Default $true
 
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
     $logDir = Join-Path $env:LOCALAPPDATA "OpenArchiver"
@@ -120,7 +150,9 @@ function Invoke-OpenArchiverJson {
 }
 
 function Get-Sha256Hex {
-    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    param([AllowEmptyCollection()][byte[]]$Bytes)
+
+    if ($null -eq $Bytes) { $Bytes = [byte[]]@() }
 
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -132,7 +164,7 @@ function Get-Sha256Hex {
 }
 
 function Get-Sha256HexFromString {
-    param([Parameter(Mandatory = $true)][string]$Value)
+    param([AllowEmptyString()][string]$Value)
     return Get-Sha256Hex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Value))
 }
 
@@ -150,6 +182,28 @@ function Get-PropSafe {
     } catch {
         return $null
     }
+}
+
+function Get-OutlookMessageClass {
+    param($Item)
+
+    try {
+        $messageClass = "$($Item.MessageClass)"
+        if (-not [string]::IsNullOrWhiteSpace($messageClass)) { return $messageClass }
+    } catch {}
+
+    return ""
+}
+
+function Test-SupportedOutlookItem {
+    param($Item)
+
+    $messageClass = Get-OutlookMessageClass $Item
+    return (
+        $messageClass.StartsWith("IPM.Note", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $messageClass.StartsWith("IPM.Schedule.Meeting", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $messageClass.StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)
+    )
 }
 
 function Get-InternetMessageId {
@@ -366,11 +420,174 @@ function Get-RecipientHeader {
 }
 
 function ConvertTo-Base64Lines {
-    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    param([AllowEmptyCollection()][byte[]]$Bytes)
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return "" }
 
     $b64 = [Convert]::ToBase64String($Bytes)
     $matches = [regex]::Matches($b64, ".{1,76}")
     return (($matches | ForEach-Object { $_.Value }) -join "`r`n")
+}
+
+function Escape-IcsText {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+    return "$Value" `
+        -replace "\\", "\\\\" `
+        -replace ";", "\;" `
+        -replace ",", "\," `
+        -replace "(`r`n|`n|`r)", "\n"
+}
+
+function Format-MessageHeaderValue {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+    return ("$Value" -replace "(`r`n|`n|`r)", " ").Trim()
+}
+
+function Format-IcsUtcDate {
+    param($Value)
+
+    try {
+        $date = [DateTime]$Value
+        if ($date.Year -le 1900 -or $date.Year -ge 3000) { return "" }
+        return $date.ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+    } catch {
+        return ""
+    }
+}
+
+function Get-CalendarMethod {
+    param([string]$MessageClass)
+
+    if ($MessageClass.StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return "PUBLISH"
+    }
+    if ($MessageClass -match "(?i)\.Canceled|\.Cancel") { return "CANCEL" }
+    if ($MessageClass -match "(?i)\.Resp\.") { return "REPLY" }
+    return "REQUEST"
+}
+
+function Get-AssociatedAppointmentSafe {
+    param($Item)
+
+    try {
+        if ((Get-OutlookMessageClass $Item).StartsWith("IPM.Schedule.Meeting", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $Item.GetAssociatedAppointment($false)
+        }
+        if ((Get-OutlookMessageClass $Item).StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $Item
+        }
+    } catch {}
+
+    return $null
+}
+
+function Get-CalendarInviteIcs {
+    param(
+        [Parameter(Mandatory = $true)]$Item,
+        [Parameter(Mandatory = $true)][string]$MessageClass
+    )
+
+    if (
+        -not $MessageClass.StartsWith("IPM.Schedule.Meeting", [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not $MessageClass.StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        return $null
+    }
+
+    $appointment = Get-AssociatedAppointmentSafe $Item
+    if (-not $appointment) { return $null }
+
+    $start = Format-IcsUtcDate $appointment.Start
+    $end = Format-IcsUtcDate $appointment.End
+    if ([string]::IsNullOrWhiteSpace($start) -or [string]::IsNullOrWhiteSpace($end)) {
+        return $null
+    }
+
+    $method = Get-CalendarMethod $MessageClass
+    $uid = ""
+    try { $uid = "$($appointment.GlobalAppointmentID)" } catch {}
+    if ([string]::IsNullOrWhiteSpace($uid)) {
+        try { $uid = "$($appointment.EntryID)" } catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($uid)) {
+        $uid = Get-StableSyntheticMessageId -MailItem $Item
+    }
+    $uid = ($uid.Trim("<>") -replace "\s+", "")
+
+    $summary = ""
+    $location = ""
+    $organizerName = ""
+    $organizerEmail = ""
+    try { $summary = "$($appointment.Subject)" } catch {}
+    if ([string]::IsNullOrWhiteSpace($summary)) {
+        try { $summary = "$($Item.Subject)" } catch {}
+    }
+    try { $location = "$($appointment.Location)" } catch {}
+    try { $organizerName = "$($appointment.Organizer)" } catch {}
+    try { $organizerEmail = Get-SenderAddress $Item } catch {}
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("BEGIN:VCALENDAR")
+    $lines.Add("VERSION:2.0")
+    $lines.Add("PRODID:-//OpenArchiver//Outlook COM Importer//EN")
+    $lines.Add("METHOD:$method")
+    $lines.Add("BEGIN:VEVENT")
+    $lines.Add("UID:$uid")
+    $lines.Add("DTSTAMP:$(Format-IcsUtcDate (Get-Date))")
+    $lines.Add("DTSTART:$start")
+    $lines.Add("DTEND:$end")
+    $lines.Add("SUMMARY:$(Escape-IcsText $summary)")
+
+    if (-not [string]::IsNullOrWhiteSpace($location)) {
+        $lines.Add("LOCATION:$(Escape-IcsText $location)")
+    }
+
+    if ($method -eq "CANCEL") {
+        $lines.Add("STATUS:CANCELLED")
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($organizerEmail)) {
+        $organizer = "ORGANIZER"
+        if (-not [string]::IsNullOrWhiteSpace($organizerName)) {
+            $organizer += ";CN=$(Escape-IcsText $organizerName)"
+        }
+        $organizer += ":MAILTO:$organizerEmail"
+        $lines.Add($organizer)
+    }
+
+    try {
+        foreach ($recipient in $appointment.Recipients) {
+            $email = Get-RecipientAddress $recipient
+            if ([string]::IsNullOrWhiteSpace($email)) { continue }
+
+            $name = ""
+            try { $name = "$($recipient.Name)" } catch {}
+            $role = "REQ-PARTICIPANT"
+            try {
+                if ([int]$recipient.Type -eq 2) { $role = "OPT-PARTICIPANT" }
+            } catch {}
+
+            $attendee = "ATTENDEE;ROLE=$role"
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                $attendee += ";CN=$(Escape-IcsText $name)"
+            }
+            $attendee += ":MAILTO:$email"
+            $lines.Add($attendee)
+        }
+    } catch {}
+
+    $lines.Add("END:VEVENT")
+    $lines.Add("END:VCALENDAR")
+
+    return [ordered]@{
+        Method = $method
+        FileName = "invite.ics"
+        Content = (($lines.ToArray()) -join "`r`n") + "`r`n"
+    }
 }
 
 function Get-MailDirection {
@@ -382,6 +599,10 @@ function Get-MailDirection {
     $path = ""
     if (-not [string]::IsNullOrWhiteSpace($FolderPath)) {
         $path = "$FolderPath".ToLowerInvariant()
+    }
+    $messageClass = Get-OutlookMessageClass $MailItem
+    if ($messageClass.StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return "calendar"
     }
     if ($path -match "(^|/)(sent|sent items|sent mail)(/|$)") { return "sent" }
     if ($path -match "(^|/)(outbox|drafts)(/|$)") { return "outgoing" }
@@ -402,9 +623,16 @@ function Get-MailItemDate {
         [string]$Direction = "received"
     )
 
+    $messageClass = Get-OutlookMessageClass $MailItem
     $fieldOrder = @("ReceivedTime", "SentOn", "CreationTime", "LastModificationTime")
     if ($Direction -eq "sent" -or $Direction -eq "outgoing") {
         $fieldOrder = @("SentOn", "ReceivedTime", "CreationTime", "LastModificationTime")
+    }
+    if ($messageClass.StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $fieldOrder = @("Start", "End", "CreationTime", "LastModificationTime")
+    }
+    if ($messageClass.StartsWith("IPM.Schedule.Meeting", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $fieldOrder = @("ReceivedTime", "SentOn", "CreationTime", "LastModificationTime")
     }
 
     foreach ($name in $fieldOrder) {
@@ -462,6 +690,7 @@ function New-GeneratedEmlBytes {
         [string]$FolderPath = ""
     )
 
+    $messageClass = Get-OutlookMessageClass $MailItem
     $messageId = Get-InternetMessageId $MailItem
     if ([string]::IsNullOrWhiteSpace($messageId)) {
         $messageId = Get-StableSyntheticMessageId -MailItem $MailItem -Direction $Direction
@@ -474,8 +703,14 @@ function New-GeneratedEmlBytes {
 
     $senderName = ""
     try { $senderName = "$($MailItem.SenderName)" } catch {}
+    if ([string]::IsNullOrWhiteSpace($senderName) -and $messageClass.StartsWith("IPM.Appointment", [System.StringComparison]::OrdinalIgnoreCase)) {
+        try { $senderName = "$($MailItem.Organizer)" } catch {}
+    }
     $fallbackSenderEmail = ""
     if ($Direction -eq "sent" -or $Direction -eq "outgoing") {
+        $fallbackSenderEmail = Get-MailboxEmailFallback -FolderPath $FolderPath
+    }
+    if ($Direction -eq "calendar") {
         $fallbackSenderEmail = Get-MailboxEmailFallback -FolderPath $FolderPath
     }
     $senderEmail = Get-SenderAddress -MailItem $MailItem -FallbackEmail $fallbackSenderEmail
@@ -497,6 +732,32 @@ function New-GeneratedEmlBytes {
     $headers.Add("MIME-Version: 1.0")
     $headers.Add("X-OpenArchiver-Source: outlook_com")
     $headers.Add("X-OpenArchiver-Provider-Message-Id: $ClientId")
+    if (-not [string]::IsNullOrWhiteSpace($messageClass)) {
+        $headers.Add("X-OpenArchiver-Outlook-Message-Class: $messageClass")
+    }
+    $outlookEntryId = ""
+    $storeId = ""
+    $globalAppointmentId = ""
+    try { $outlookEntryId = Format-MessageHeaderValue "$($MailItem.EntryID)" } catch {}
+    try { $storeId = Format-MessageHeaderValue "$($MailItem.Parent.StoreID)" } catch {}
+    if ([string]::IsNullOrWhiteSpace($storeId)) {
+        try { $storeId = Format-MessageHeaderValue "$($MailItem.Parent.Store.StoreID)" } catch {}
+    }
+    try {
+        $appointmentForHeaders = Get-AssociatedAppointmentSafe $MailItem
+        if ($appointmentForHeaders) {
+            $globalAppointmentId = Format-MessageHeaderValue "$($appointmentForHeaders.GlobalAppointmentID)"
+        }
+    } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($outlookEntryId)) {
+        $headers.Add("X-OpenArchiver-Outlook-Entry-Id: $outlookEntryId")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($storeId)) {
+        $headers.Add("X-OpenArchiver-Outlook-Store-Id: $storeId")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($globalAppointmentId)) {
+        $headers.Add("X-OpenArchiver-Outlook-Global-Appointment-Id: $globalAppointmentId")
+    }
 
     $html = ""
     $text = ""
@@ -515,8 +776,9 @@ function New-GeneratedEmlBytes {
 
     $attachmentCount = 0
     try { $attachmentCount = [int]$MailItem.Attachments.Count } catch {}
+    $calendarPart = Get-CalendarInviteIcs -Item $MailItem -MessageClass $messageClass
 
-    if ($attachmentCount -le 0) {
+    if ($attachmentCount -le 0 -and -not $calendarPart) {
         $headers.Add("Content-Type: $bodyContentType; charset=utf-8")
         $headers.Add("Content-Transfer-Encoding: base64")
         $eml = (($headers.ToArray()) -join "`r`n") + "`r`n`r`n" + $bodyBase64 + "`r`n"
@@ -532,6 +794,19 @@ function New-GeneratedEmlBytes {
     $parts.Add("Content-Transfer-Encoding: base64")
     $parts.Add("")
     $parts.Add($bodyBase64)
+
+    if ($calendarPart) {
+        $calendarBytes = [System.Text.Encoding]::UTF8.GetBytes($calendarPart["Content"])
+        $calendarFileName = $calendarPart["FileName"]
+        $calendarMethod = $calendarPart["Method"]
+
+        $parts.Add("--$boundary")
+        $parts.Add("Content-Type: text/calendar; charset=utf-8; method=$calendarMethod; name=`"$calendarFileName`"")
+        $parts.Add("Content-Disposition: attachment; filename=`"$calendarFileName`"")
+        $parts.Add("Content-Transfer-Encoding: base64")
+        $parts.Add("")
+        $parts.Add((ConvertTo-Base64Lines $calendarBytes))
+    }
 
     $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("oa-outlook-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
@@ -645,6 +920,7 @@ function Resolve-OutlookFolder {
         "sent items" { return $script:OutlookNs.GetDefaultFolder(5) }
         "deleted items" { return $script:OutlookNs.GetDefaultFolder(3) }
         "drafts" { return $script:OutlookNs.GetDefaultFolder(16) }
+        "calendar" { return $script:OutlookNs.GetDefaultFolder(9) }
     }
 
     foreach ($root in $script:OutlookNs.Folders) {
@@ -721,7 +997,11 @@ function Submit-PendingBatch {
                 mailboxEmail = $MailboxEmail
                 folderPath = $entry.folderPath
                 emlBase64 = [Convert]::ToBase64String($emlBytes)
-                tags = @("outlook-com", "outlook-direction:$direction")
+                tags = @(
+                    "outlook-com",
+                    "outlook-direction:$direction",
+                    "outlook-message-class:$($entry.messageClass)"
+                )
             }
 
             if ($uploadMessages.Count -ge $UploadBatchSize) {
@@ -829,7 +1109,9 @@ function Invoke-MailScan {
             $items = $null
             try {
                 $items = $scanFolder.Items
-                try { $items.Sort("[ReceivedTime]", $true) } catch {}
+                try { $items.Sort("[ReceivedTime]", $true) } catch {
+                    try { $items.Sort("[Start]", $true) } catch {}
+                }
             } catch {
                 Write-Log "Unable to read folder items for ${folderPath}: $($_.Exception.Message)" "WARN"
                 continue
@@ -839,8 +1121,8 @@ function Invoke-MailScan {
                 if ($MaxMessages -gt 0 -and $totalSeen -ge $MaxMessages) { break }
 
                 try {
-                    $messageClass = "$($item.MessageClass)"
-                    if (-not $messageClass.StartsWith("IPM.Note")) { continue }
+                    $messageClass = Get-OutlookMessageClass $item
+                    if (-not (Test-SupportedOutlookItem $item)) { continue }
                     $direction = Get-MailDirection -FolderPath $folderPath -MailItem $item
                     if (-not (Test-MailItemInWindow -MailItem $item -DaysBack $DaysBack -Direction $direction)) { continue }
 
@@ -850,6 +1132,7 @@ function Invoke-MailScan {
                         fingerprint = $fingerprint
                         folderPath = $folderPath
                         direction = $direction
+                        messageClass = $messageClass
                     }
                     $totalSeen += 1
 
@@ -908,7 +1191,9 @@ function Invoke-SenderRepairScan {
             $items = $null
             try {
                 $items = $scanFolder.Items
-                try { $items.Sort("[ReceivedTime]", $true) } catch {}
+                try { $items.Sort("[ReceivedTime]", $true) } catch {
+                    try { $items.Sort("[Start]", $true) } catch {}
+                }
             } catch {
                 Write-Log "Unable to read folder items for ${folderPath}: $($_.Exception.Message)" "WARN"
                 continue
@@ -918,8 +1203,8 @@ function Invoke-SenderRepairScan {
                 if ($MaxMessages -gt 0 -and $totalSeen -ge $MaxMessages) { break }
 
                 try {
-                    $messageClass = "$($item.MessageClass)"
-                    if (-not $messageClass.StartsWith("IPM.Note")) { continue }
+                    $messageClass = Get-OutlookMessageClass $item
+                    if (-not (Test-SupportedOutlookItem $item)) { continue }
                     $direction = Get-MailDirection -FolderPath $folderPath -MailItem $item
                     if (-not (Test-MailItemInWindow -MailItem $item -DaysBack $DaysBack -Direction $direction)) { continue }
 
@@ -929,6 +1214,7 @@ function Invoke-SenderRepairScan {
                         fingerprint = $fingerprint
                         folderPath = $folderPath
                         direction = $direction
+                        messageClass = $messageClass
                     }
                     $totalSeen += 1
 
