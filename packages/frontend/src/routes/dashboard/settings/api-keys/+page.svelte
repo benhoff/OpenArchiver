@@ -5,7 +5,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as Select from '$lib/components/ui/select';
 	import * as Table from '$lib/components/ui/table';
-	import type { ActionData, PageData } from './$types';
+	import type { PageData } from './$types';
 	import { t } from '$lib/translations';
 	import { MoreHorizontal, Trash } from 'lucide-svelte';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -24,13 +24,16 @@
 		updatedAt: Date;
 	};
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 	let apiKeys = $state<ApiKey[]>(data.apiKeys);
 
 	let isDeleteDialogOpen = $state(false);
 	let newAPIKeyDialogOpen = $state(false);
 	let keyToDelete = $state<ApiKey | null>(null);
 	let isDeleting = $state(false);
+	let isGenerating = $state(false);
+	let keyName = $state('');
+	let newApiKey = $state<string | null>(null);
 	let selectedExpiration = $state('30');
 	const expirationOptions = [
 		{ value: '30', label: $t('app.api_keys_page.30_days') },
@@ -47,6 +50,68 @@
 	const openDeleteDialog = (apiKey: ApiKey) => {
 		keyToDelete = apiKey;
 		isDeleteDialogOpen = true;
+	};
+
+	const generateApiKey = async (event: SubmitEvent) => {
+		event.preventDefault();
+		isGenerating = true;
+
+		try {
+			const response = await api('/api-keys', {
+				method: 'POST',
+				body: JSON.stringify({
+					name: keyName,
+					expiresInDays: Number(selectedExpiration),
+				}),
+			});
+			const responseBody = await response.json();
+
+			if (!response.ok) {
+				const details =
+					typeof responseBody.errors === 'string'
+						? responseBody.errors
+						: responseBody.message || JSON.stringify(responseBody);
+				setAlert({
+					type: 'error',
+					title: responseBody.message || $t('app.api_keys_page.generate_modal_title'),
+					message: details,
+					duration: 5000,
+					show: true,
+				});
+				return;
+			}
+
+			newApiKey = responseBody.key;
+			newAPIKeyDialogOpen = false;
+			keyName = '';
+
+			try {
+				const keysResponse = await api('/api-keys');
+				if (keysResponse.ok) {
+					apiKeys = await keysResponse.json();
+				}
+			} catch {
+				// The key was still created successfully; the list will refresh on navigation.
+			}
+
+			setAlert({
+				type: 'success',
+				title: $t('app.api_keys_page.generated_title'),
+				message: $t('app.api_keys_page.generated_message'),
+				duration: 5000,
+				show: true,
+			});
+		} catch (error) {
+			setAlert({
+				type: 'error',
+				title: $t('app.api_keys_page.generate_modal_title'),
+				message: error instanceof Error ? error.message : String(error),
+				duration: 5000,
+				show: true,
+			});
+		} finally {
+			isGenerating = false;
+		}
 	};
 
 	const confirmDelete = async () => {
@@ -79,27 +144,6 @@
 			isDeleting = false;
 		}
 	};
-
-	$effect(() => {
-		if (form?.newApiKey) {
-			setAlert({
-				type: 'success',
-				title: $t('app.api_keys_page.generated_title'),
-				message: $t('app.api_keys_page.generated_message'),
-				duration: 3000, // Keep it on screen longer for copying
-				show: true,
-			});
-		}
-		if (form?.errors) {
-			setAlert({
-				type: 'error',
-				title: form.message,
-				message: form.errors || '',
-				duration: 3000, // Keep it on screen longer for copying
-				show: true,
-			});
-		}
-	});
 </script>
 
 <svelte:head>
@@ -122,19 +166,19 @@
 						{$t('app.api_keys_page.generate_modal_description')}
 					</Dialog.Description>
 				</Dialog.Header>
-				<form
-					method="POST"
-					action="?/generate"
-					onsubmit={() => {
-						newAPIKeyDialogOpen = false;
-					}}
-				>
+				<form onsubmit={generateApiKey}>
 					<div class="grid gap-4 py-4">
 						<div class="grid grid-cols-4 items-center gap-4">
 							<Label for="name" class="text-right"
 								>{$t('app.api_keys_page.name')}</Label
 							>
-							<Input id="name" name="name" class="col-span-3" />
+							<Input
+								id="name"
+								name="name"
+								class="col-span-3"
+								bind:value={keyName}
+								required
+							/>
 						</div>
 						<div class="grid grid-cols-4 items-center gap-4">
 							<Label for="expiresInDays" class="text-right"
@@ -159,13 +203,17 @@
 						</div>
 					</div>
 					<Dialog.Footer>
-						<Button type="submit">{$t('app.api_keys_page.generate')}</Button>
+						<Button type="submit" disabled={isGenerating}>
+							{isGenerating
+								? $t('app.common.working')
+								: $t('app.api_keys_page.generate')}
+						</Button>
 					</Dialog.Footer>
 				</form>
 			</Dialog.Content>
 		</Dialog.Root>
 	</div>
-	{#if form?.newApiKey}
+	{#if newApiKey}
 		<Card.Root class="mb-4 border-0 bg-green-200 text-green-600 shadow-none">
 			<Card.Header>
 				<Card.Title>{$t('app.api_keys_page.generated_title')}</Card.Title>
@@ -174,7 +222,7 @@
 				>
 			</Card.Header>
 			<Card.Content>
-				<p>{form?.newApiKey}</p>
+				<p>{newApiKey}</p>
 			</Card.Content>
 		</Card.Root>
 	{/if}
