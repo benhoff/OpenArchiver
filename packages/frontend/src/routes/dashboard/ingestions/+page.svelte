@@ -506,33 +506,38 @@
 								/>
 							</Table.Cell>
 							<Table.Cell>
-								<div class="flex items-center gap-1">
-									{#if hasChildren}
-										<button
-											class="cursor-pointer rounded p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800"
-											onclick={() => toggleGroup(source.id)}
-											aria-label={isExpanded
-												? $t('app.ingestions.collapse')
-												: $t('app.ingestions.expand')}
+								<div class="flex flex-col gap-0.5">
+									<div class="flex items-center gap-1">
+										{#if hasChildren}
+											<button
+												class="cursor-pointer rounded p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800"
+												onclick={() => toggleGroup(source.id)}
+												aria-label={isExpanded
+													? $t('app.ingestions.collapse')
+													: $t('app.ingestions.expand')}
+											>
+												<ChevronRight
+													class="h-4 w-4 transition-transform {isExpanded
+														? 'rotate-90'
+														: ''}"
+												/>
+											</button>
+										{/if}
+										<a
+											class="link"
+											href="/dashboard/archived-emails?ingestionSourceId={source.id}"
+											>{source.name}</a
 										>
-											<ChevronRight
-												class="h-4 w-4 transition-transform {isExpanded
-													? 'rotate-90'
-													: ''}"
-											/>
-										</button>
-									{/if}
-									<a
-										class="link"
-										href="/dashboard/archived-emails?ingestionSourceId={source.id}"
-										>{source.name}</a
-									>
-									{#if hasChildren}
-										<span class="text-muted-foreground ml-1 text-xs"
-											>({children.length}
-											{$t('app.ingestions.merged_sources')})</span
-										>
-									{/if}
+										{#if hasChildren}
+											<span class="text-muted-foreground ml-1 text-xs"
+												>({children.length}
+												{$t('app.ingestions.merged_sources')})</span
+											>
+										{/if}
+									</div>
+									<code class="text-muted-foreground select-all font-mono text-xs">
+										ID: {source.id}
+									</code>
 								</div>
 							</Table.Cell>
 							<Table.Cell class="capitalize"
@@ -615,11 +620,18 @@
 										<div class="flex items-center gap-1 pl-6">
 											<span class="text-muted-foreground mr-1">└</span>
 											<!-- Child emails are stored under the root source — link to root -->
-											<a
-												class="link"
-												href="/dashboard/archived-emails?ingestionSourceId={child.mergedIntoId}"
-												>{child.name}</a
-											>
+											<div class="flex flex-col gap-0.5">
+												<a
+													class="link"
+													href="/dashboard/archived-emails?ingestionSourceId={child.mergedIntoId}"
+													>{child.name}</a
+												>
+												<code
+													class="text-muted-foreground select-all font-mono text-xs"
+												>
+													ID: {child.id}
+												</code>
+											</div>
 										</div>
 									</Table.Cell>
 									<Table.Cell class="capitalize"
