@@ -32,12 +32,13 @@ interface IcsEvent {
 	properties: IcsProperty[];
 }
 
-interface CalendarEventInput {
+export interface CalendarEventInput {
 	canonicalKey: string;
 	ingestionSourceId: string;
 	userEmail: string;
 	sourceKind: CalendarSourceKind;
 	sourceEmailId: string;
+	archivedEmailId?: string;
 	sourcePriority: number;
 	providerEventId: string | null;
 	globalAppointmentId: string | null;
@@ -68,6 +69,7 @@ interface ParseAndUpsertResult {
 }
 
 const SOURCE_PRIORITIES: Record<CalendarSourceKind, number> = {
+	google_calendar: 110,
 	outlook_calendar: 100,
 	ipm_appointment_eml: 90,
 	meeting_update_ics: 70,
@@ -381,6 +383,7 @@ export class CalendarEventService {
 			userEmail: email.userEmail,
 			sourceKind,
 			sourceEmailId: email.id,
+			archivedEmailId: email.id,
 			sourcePriority: SOURCE_PRIORITIES[sourceKind],
 			providerEventId: email.providerMessageId,
 			globalAppointmentId: uid,
@@ -418,7 +421,7 @@ export class CalendarEventService {
 		};
 	}
 
-	private async upsertCalendarEvent(input: CalendarEventInput): Promise<boolean> {
+	public async upsertCalendarEvent(input: CalendarEventInput): Promise<boolean> {
 		const existing = await db.query.calendarEvents.findFirst({
 			where: eq(calendarEvents.canonicalKey, input.canonicalKey),
 		});
@@ -466,14 +469,16 @@ export class CalendarEventService {
 				.where(eq(calendarEvents.id, existing.id));
 		}
 
-		await db
-			.insert(calendarEventObservations)
-			.values({
-				calendarEventId,
-				archivedEmailId: input.sourceEmailId,
-				sourceKind: input.sourceKind,
-			})
-			.onConflictDoNothing();
+		if (input.archivedEmailId) {
+			await db
+				.insert(calendarEventObservations)
+				.values({
+					calendarEventId,
+					archivedEmailId: input.archivedEmailId,
+					sourceKind: input.sourceKind,
+				})
+				.onConflictDoNothing();
+		}
 
 		return true;
 	}

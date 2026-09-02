@@ -3,7 +3,7 @@
 	import * as Table from '$lib/components/ui/table';
 	import { Button } from '$lib/components/ui/button';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { MoreHorizontal, Trash, RefreshCw, ChevronRight } from 'lucide-svelte';
+	import { MoreHorizontal, Trash, RefreshCw, ChevronRight, CalendarPlus } from 'lucide-svelte';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Switch } from '$lib/components/ui/switch';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -27,6 +27,7 @@
 	let isUnmergeDialogOpen = $state(false);
 	let sourceToUnmerge = $state<SafeIngestionSource | null>(null);
 	let isUnmerging = $state(false);
+	let isConnectingGoogleCalendar = $state(false);
 	/** Tracks which root source groups are expanded in the table */
 	let expandedGroups = $state<Set<string>>(new Set());
 
@@ -134,10 +135,39 @@
 		}
 		ingestionSources = ingestionSources.map((s) => {
 			if (s.id === source.id) {
-				return { ...s, status: source.provider === 'outlook_com' ? 'active' : 'syncing' };
+				return {
+					...s,
+					status: ['outlook_com', 'google_calendar'].includes(source.provider)
+						? 'active'
+						: 'syncing',
+				};
 			}
 			return s;
 		});
+	};
+
+	const connectGoogleCalendar = async () => {
+		isConnectingGoogleCalendar = true;
+		try {
+			const res = await api('/google-calendar/auth-url');
+			const body = await res.json();
+			if (!res.ok) {
+				throw new Error(body.message || 'Failed to start Google Calendar OAuth.');
+			}
+			if (typeof body.url !== 'string') {
+				throw new Error('Google Calendar OAuth URL was missing from the response.');
+			}
+			window.location.href = body.url;
+		} catch (error) {
+			setAlert({
+				type: 'error',
+				title: 'Failed to connect Google Calendar',
+				message: error instanceof Error ? error.message : JSON.stringify(error),
+				duration: 5000,
+				show: true,
+			});
+			isConnectingGoogleCalendar = false;
+		}
 	};
 
 	const handleToggle = async (source: SafeIngestionSource) => {
@@ -266,7 +296,13 @@
 			}
 			// Backend cascades force sync to non-file-based children,
 			// so optimistically mark root + eligible children as syncing
-			const nonSyncProviders = ['pst_import', 'eml_import', 'mbox_import', 'outlook_com'];
+			const nonSyncProviders = [
+				'pst_import',
+				'eml_import',
+				'mbox_import',
+				'outlook_com',
+				'google_calendar',
+			];
 			ingestionSources = ingestionSources.map((s) => {
 				// Mark selected roots as syncing
 				if (selectedIds.includes(s.id)) {
@@ -403,7 +439,17 @@
 				</DropdownMenu.Root>
 			{/if}
 		</div>
-		<Button onclick={openCreateDialog}>{$t('app.ingestions.create_new')}</Button>
+		<div class="flex items-center gap-2">
+			<Button
+				variant="outline"
+				onclick={connectGoogleCalendar}
+				disabled={isConnectingGoogleCalendar}
+			>
+				<CalendarPlus class="mr-2 h-4 w-4" />
+				Google Calendar
+			</Button>
+			<Button onclick={openCreateDialog}>{$t('app.ingestions.create_new')}</Button>
+		</div>
 	</div>
 
 	<div class="rounded-md border">

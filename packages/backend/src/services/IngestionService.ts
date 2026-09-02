@@ -31,6 +31,7 @@ import { AuditService } from './AuditService';
 import { User } from '@open-archiver/types';
 import { checkDeletionEnabled } from '../helpers/deletionGuard';
 import { CalendarEventService } from './CalendarEventService';
+import { GoogleCalendarService } from './GoogleCalendarService';
 
 export class IngestionService {
 	private static auditService = new AuditService();
@@ -393,6 +394,21 @@ export class IngestionService {
 				actor,
 				actorIp
 			);
+			return;
+		}
+
+		if (source.provider === 'google_calendar') {
+			await new GoogleCalendarService().syncIngestionSourceById(source.id);
+			await this.auditService.createAuditLog({
+				actorIdentifier: actor.id,
+				actionType: 'SYNC',
+				targetType: 'IngestionSource',
+				targetId: id,
+				actorIp,
+				details: {
+					sourceName: source.name,
+				},
+			});
 			return;
 		}
 

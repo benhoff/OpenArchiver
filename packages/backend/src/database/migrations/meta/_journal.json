@@ -260,6 +260,13 @@
 			"when": 1777650000000,
 			"tag": "0036_calendar_events",
 			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "7",
+			"when": 1777653600000,
+			"tag": "0037_google_calendar_integration",
+			"breakpoints": true
 		}
 	]
 }

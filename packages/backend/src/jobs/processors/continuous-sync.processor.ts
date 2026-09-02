@@ -5,6 +5,7 @@ import { EmailProviderFactory } from '../../services/EmailProviderFactory';
 import { ingestionQueue } from '../queues';
 import { SyncSessionService } from '../../services/SyncSessionService';
 import { logger } from '../../config/logger';
+import { GoogleCalendarService } from '../../services/GoogleCalendarService';
 
 export default async (job: Job<IContinuousSyncJob>) => {
 	const { ingestionSourceId } = job.data;
@@ -16,6 +17,12 @@ export default async (job: Job<IContinuousSyncJob>) => {
 			{ ingestionSourceId, status: source?.status },
 			'Skipping continuous sync for non-active or non-error source.'
 		);
+		return;
+	}
+
+	if (source.provider === 'google_calendar') {
+		const result = await new GoogleCalendarService().syncIngestionSourceById(ingestionSourceId);
+		logger.info({ ingestionSourceId, result }, 'Google Calendar continuous sync complete.');
 		return;
 	}
 

@@ -70,6 +70,8 @@ export class EmailProviderFactory {
 				return new MboxConnector(credentials as MboxImportCredentials, options);
 			case 'outlook_com':
 				return new OutlookComConnector(credentials as OutlookComCredentials);
+			case 'google_calendar':
+				throw new Error('Google Calendar sources are synced by GoogleCalendarService.');
 			default:
 				throw new Error(`Unsupported provider: ${source.provider}`);
 		}

@@ -26,7 +26,8 @@ export type IngestionProvider =
 	| 'eml_import'
 	| 'mbox_import'
 	| 'smtp_journaling'
-	| 'outlook_com';
+	| 'outlook_com'
+	| 'google_calendar';
 
 export type IngestionStatus =
 	| 'active'
@@ -106,6 +107,10 @@ export interface OutlookComCredentials extends BaseIngestionCredentials {
 	mailboxEmail?: string;
 }
 
+export interface GoogleCalendarCredentials extends BaseIngestionCredentials {
+	type: 'google_calendar';
+}
+
 // Discriminated union for all possible credential types
 export type IngestionCredentials =
 	| GenericImapCredentials
@@ -115,7 +120,8 @@ export type IngestionCredentials =
 	| EMLImportCredentials
 	| MboxImportCredentials
 	| SmtpJournalingCredentials
-	| OutlookComCredentials;
+	| OutlookComCredentials
+	| GoogleCalendarCredentials;
 
 export interface IngestionSource {
 	id: string;

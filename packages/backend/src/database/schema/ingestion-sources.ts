@@ -21,6 +21,7 @@ export const ingestionProviderEnum = pgEnum('ingestion_provider', [
 	'mbox_import',
 	'smtp_journaling',
 	'outlook_com',
+	'google_calendar',
 ]);
 
 export const ingestionStatusEnum = pgEnum('ingestion_status', [

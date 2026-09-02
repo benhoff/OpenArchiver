@@ -5,7 +5,8 @@ export type CalendarSourceKind =
 	| 'meeting_update_ics'
 	| 'cancellation'
 	| 'reply'
-	| 'email_ics';
+	| 'email_ics'
+	| 'google_calendar';
 
 export interface CalendarEvent {
 	id: string;
@@ -62,4 +63,40 @@ export interface CalendarBackfillResult {
 	upsertedEvents: number;
 	errors: number;
 	limit: number;
+}
+
+export interface GoogleCalendarConnection {
+	id: string;
+	ingestionSourceId: string;
+	userId: string;
+	googleAccountEmail: string;
+	selectedCalendarIds: string[];
+	status: string;
+	lastSyncStartedAt: Date | null;
+	lastSyncFinishedAt: Date | null;
+	lastSyncStatusMessage: string | null;
+	createdAt: Date;
+	updatedAt: Date;
+}
+
+export interface GoogleCalendarListItem {
+	id: string;
+	summary: string;
+	primary: boolean;
+	hidden: boolean;
+	selected: boolean;
+	accessRole: string;
+	timeZone: string | null;
+	backgroundColor: string | null;
+}
+
+export interface GoogleCalendarSyncResult {
+	connectionId: string;
+	calendarsScanned: number;
+	calendarsSkipped: number;
+	eventsSeen: number;
+	eventsUpserted: number;
+	errors: number;
+	from: Date;
+	to: Date;
 }
