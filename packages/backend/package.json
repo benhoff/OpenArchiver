@@ -10,6 +10,7 @@
 		"./*": "./dist/*.js"
 	},
 	"scripts": {
+		"test:archived-email": "tsc -b ../types . && node scripts/test-archived-email.cjs",
 		"build": "tsc && pnpm copy-assets",
 		"dev": "tsc --watch",
 		"copy-assets": "cp -r src/locales dist/locales",

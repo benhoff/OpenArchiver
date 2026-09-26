@@ -34,6 +34,10 @@ export const archivedEmails = pgTable(
 	(table) => [
 		index('thread_id_idx').on(table.threadId),
 		index('provider_msg_source_idx').on(table.providerMessageId, table.ingestionSourceId),
+		index('archived_email_sent_at_id_idx').on(table.sentAt, table.id),
+		index('archived_email_path_sent_at_id_idx').on(table.path, table.sentAt, table.id),
+		index('archived_email_archived_at_id_idx').on(table.archivedAt, table.id),
+		index('archived_email_path_archived_at_id_idx').on(table.path, table.archivedAt, table.id),
 	]
 );
 

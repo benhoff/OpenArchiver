@@ -1,7 +1,9 @@
-import { count, desc, eq, asc, and, inArray } from 'drizzle-orm';
+import { count, desc, eq, asc, and, inArray, sql, type SQL } from 'drizzle-orm';
 import { db } from '../database';
 import {
 	archivedEmails,
+	archivedEmailChanges,
+	archivedEmailChangeCounter,
 	attachments,
 	emailAttachments,
 	ingestionSources,
@@ -11,6 +13,10 @@ import { AuthorizationService } from './AuthorizationService';
 import type {
 	PaginatedArchivedEmails,
 	ArchivedEmail,
+	ArchivedEmailContent,
+	ArchivedEmailContentAddress,
+	ArchivedEmailChangesResponse,
+	ArchivedEmailFeedResponse,
 	Recipient,
 	ThreadEmail,
 } from '@open-archiver/types';
@@ -23,12 +29,49 @@ import { User } from '@open-archiver/types';
 import { checkDeletionEnabled } from '../helpers/deletionGuard';
 import { RetentionHook } from '../hooks/RetentionHook';
 import { logger } from '../config/logger';
+import { simpleParser, type AddressObject } from 'mailparser';
+import { createHash } from 'crypto';
 
 interface DbRecipients {
 	to: { name: string; address: string }[];
 	cc: { name: string; address: string }[];
 	bcc: { name: string; address: string }[];
 }
+
+interface ArchivedEmailFeedCursor {
+	sentAt: string;
+	id: string;
+}
+
+interface ArchivedEmailChangesCursor {
+	v: 2;
+	position: string;
+	scope: string;
+}
+
+export interface ArchivedEmailFeedOptions {
+	userId: string;
+	path?: string;
+	ingestionSourceId?: string;
+	cursor?: string;
+	limit: number;
+}
+
+export class InvalidArchivedEmailFeedCursorError extends Error {
+	constructor() {
+		super('Invalid message feed cursor.');
+		this.name = 'InvalidArchivedEmailFeedCursorError';
+	}
+}
+
+export class InvalidArchivedEmailChangesCursorError extends Error {
+	constructor() {
+		super('Invalid message changes cursor or cursor filters do not match this request.');
+		this.name = 'InvalidArchivedEmailChangesCursorError';
+	}
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 async function streamToBuffer(stream: Readable): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
@@ -41,8 +84,107 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
 
 export class ArchivedEmailService {
 	private static auditService = new AuditService();
+
+	private static encodeFeedCursor(cursor: ArchivedEmailFeedCursor): string {
+		return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+	}
+
+	private static decodeFeedCursor(cursor: string): ArchivedEmailFeedCursor {
+		try {
+			if (cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+				throw new InvalidArchivedEmailFeedCursorError();
+			}
+
+			const parsed = JSON.parse(
+				Buffer.from(cursor, 'base64url').toString('utf8')
+			) as Partial<ArchivedEmailFeedCursor>;
+			if (
+				typeof parsed.sentAt !== 'string' ||
+				Number.isNaN(Date.parse(parsed.sentAt)) ||
+				typeof parsed.id !== 'string' ||
+				!UUID_PATTERN.test(parsed.id)
+			) {
+				throw new InvalidArchivedEmailFeedCursorError();
+			}
+
+			return { sentAt: parsed.sentAt, id: parsed.id };
+		} catch (error) {
+			if (error instanceof InvalidArchivedEmailFeedCursorError) {
+				throw error;
+			}
+			throw new InvalidArchivedEmailFeedCursorError();
+		}
+	}
+
+	private static getChangesScope(options: {
+		userId: string;
+		path?: string;
+		ingestionSourceId?: string;
+	}): string {
+		return createHash('sha256')
+			.update(
+				JSON.stringify([
+					options.userId,
+					options.path ?? null,
+					options.ingestionSourceId ?? null,
+				])
+			)
+			.digest('base64url');
+	}
+
+	private static encodeChangesCursor(cursor: ArchivedEmailChangesCursor): string {
+		return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+	}
+
+	private static decodeChangesCursor(
+		cursor: string,
+		expectedScope: string
+	): ArchivedEmailChangesCursor {
+		try {
+			if (cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+				throw new InvalidArchivedEmailChangesCursorError();
+			}
+
+			const parsed = JSON.parse(
+				Buffer.from(cursor, 'base64url').toString('utf8')
+			) as Partial<ArchivedEmailChangesCursor>;
+			if (
+				parsed.v !== 2 ||
+				typeof parsed.position !== 'string' ||
+				!/^(0|[1-9][0-9]{0,18})$/.test(parsed.position) ||
+				BigInt(parsed.position) > 9223372036854775807n ||
+				parsed.scope !== expectedScope
+			) {
+				throw new InvalidArchivedEmailChangesCursorError();
+			}
+
+			return parsed as ArchivedEmailChangesCursor;
+		} catch (error) {
+			if (error instanceof InvalidArchivedEmailChangesCursorError) {
+				throw error;
+			}
+			throw new InvalidArchivedEmailChangesCursorError();
+		}
+	}
+
+	private static mapAddressObject(
+		address: AddressObject | AddressObject[] | undefined
+	): ArchivedEmailContentAddress[] {
+		if (!address) return [];
+
+		const addressObjects = Array.isArray(address) ? address : [address];
+		return addressObjects.flatMap((addressObject) =>
+			addressObject.value
+				.filter((value) => Boolean(value.address))
+				.map((value) => ({
+					name: value.name || null,
+					email: value.address || '',
+				}))
+		);
+	}
+
 	private static mapRecipients(dbRecipients: unknown): Recipient[] {
-		const { to = [], cc = [], bcc = [] } = dbRecipients as DbRecipients;
+		const { to = [], cc = [], bcc = [] } = (dbRecipients ?? {}) as DbRecipients;
 
 		const allRecipients = [...to, ...cc, ...bcc];
 
@@ -50,6 +192,203 @@ export class ArchivedEmailService {
 			name: r.name,
 			email: r.address,
 		}));
+	}
+
+	/**
+	 * Returns a stable, newest-first feed across every archive the caller may read.
+	 * The optional path filter is an exact match against archived_emails.path.
+	 */
+	public static async getArchivedEmailFeed(
+		options: ArchivedEmailFeedOptions
+	): Promise<ArchivedEmailFeedResponse> {
+		const { drizzleFilter } = await FilterBuilder.create(options.userId, 'archive', 'read');
+		const conditions: (SQL | undefined)[] = [drizzleFilter];
+
+		if (options.path !== undefined) {
+			conditions.push(eq(archivedEmails.path, options.path));
+		}
+
+		if (options.ingestionSourceId) {
+			const groupIds = await IngestionService.findGroupSourceIds(options.ingestionSourceId);
+			conditions.push(
+				groupIds.length === 1
+					? eq(archivedEmails.ingestionSourceId, groupIds[0])
+					: inArray(archivedEmails.ingestionSourceId, groupIds)
+			);
+		}
+
+		if (options.cursor !== undefined) {
+			const cursor = this.decodeFeedCursor(options.cursor);
+			conditions.push(
+				sql`(${archivedEmails.sentAt}, ${archivedEmails.id}) < (${cursor.sentAt}::timestamptz, ${cursor.id}::uuid)`
+			);
+		}
+
+		const rows = await db
+			.select({
+				id: archivedEmails.id,
+				threadId: archivedEmails.threadId,
+				ingestionSourceId: archivedEmails.ingestionSourceId,
+				userEmail: archivedEmails.userEmail,
+				messageIdHeader: archivedEmails.messageIdHeader,
+				providerMessageId: archivedEmails.providerMessageId,
+				sentAt: archivedEmails.sentAt,
+				cursorSentAt: sql<string>`${archivedEmails.sentAt}::text`,
+				subject: archivedEmails.subject,
+				senderName: archivedEmails.senderName,
+				senderEmail: archivedEmails.senderEmail,
+				recipients: archivedEmails.recipients,
+				hasAttachments: archivedEmails.hasAttachments,
+				archivedAt: archivedEmails.archivedAt,
+				path: archivedEmails.path,
+				tags: archivedEmails.tags,
+			})
+			.from(archivedEmails)
+			.leftJoin(ingestionSources, eq(archivedEmails.ingestionSourceId, ingestionSources.id))
+			.where(and(...conditions))
+			.orderBy(desc(archivedEmails.sentAt), desc(archivedEmails.id))
+			.limit(options.limit + 1);
+
+		const hasMore = rows.length > options.limit;
+		const pageRows = hasMore ? rows.slice(0, options.limit) : rows;
+		const lastRow = pageRows.at(-1);
+
+		return {
+			items: pageRows.map((row) => ({
+				id: row.id,
+				threadId: row.threadId,
+				ingestionSourceId: row.ingestionSourceId,
+				userEmail: row.userEmail,
+				messageIdHeader: row.messageIdHeader,
+				providerMessageId: row.providerMessageId,
+				sentAt: row.sentAt,
+				subject: row.subject,
+				senderName: row.senderName,
+				senderEmail: row.senderEmail,
+				recipients: this.mapRecipients(row.recipients),
+				hasAttachments: row.hasAttachments,
+				archivedAt: row.archivedAt,
+				path: row.path,
+				tags: (row.tags as string[] | null) || null,
+			})),
+			nextCursor:
+				hasMore && lastRow
+					? this.encodeFeedCursor({ sentAt: lastRow.cursorSentAt, id: lastRow.id })
+					: null,
+			hasMore,
+		};
+	}
+
+	/**
+	 * Returns emails added to the archive after a durable polling checkpoint.
+	 * The first request establishes a checkpoint without replaying existing history.
+	 */
+	public static async getArchivedEmailChanges(
+		options: ArchivedEmailFeedOptions
+	): Promise<ArchivedEmailChangesResponse> {
+		const { drizzleFilter } = await FilterBuilder.create(options.userId, 'archive', 'read');
+		const conditions: (SQL | undefined)[] = [drizzleFilter];
+		const scope = this.getChangesScope(options);
+
+		if (options.path !== undefined) {
+			conditions.push(eq(archivedEmails.path, options.path));
+		}
+
+		if (options.ingestionSourceId) {
+			const groupIds = await IngestionService.findGroupSourceIds(options.ingestionSourceId);
+			conditions.push(
+				groupIds.length === 1
+					? eq(archivedEmails.ingestionSourceId, groupIds[0])
+					: inArray(archivedEmails.ingestionSourceId, groupIds)
+			);
+		}
+
+		const cursor =
+			options.cursor === undefined
+				? undefined
+				: this.decodeChangesCursor(options.cursor, scope);
+		// Bound this poll to a committed prefix. Once it is drained, advance past
+		// nonmatching/deleted entries too, so empty polls do not rescan old history.
+		// In-flight inserts are beyond this position and appear on a later poll.
+		const [checkpoint] = await db
+			.select()
+			.from(archivedEmailChangeCounter)
+			.where(eq(archivedEmailChangeCounter.id, 1));
+		if (!checkpoint) throw new Error('Archived email change counter is missing.');
+
+		if (cursor === undefined) {
+			return {
+				items: [],
+				nextCursor: this.encodeChangesCursor({
+					v: 2,
+					position: checkpoint.position.toString(),
+					scope,
+				}),
+				hasMore: false,
+			};
+		}
+
+		if (BigInt(cursor.position) > checkpoint.position) {
+			throw new InvalidArchivedEmailChangesCursorError();
+		}
+		conditions.push(
+			sql`${archivedEmailChanges.position} > ${cursor.position}::bigint`,
+			sql`${archivedEmailChanges.position} <= ${checkpoint.position}`
+		);
+
+		const rows = await db
+			.select({
+				id: archivedEmails.id,
+				threadId: archivedEmails.threadId,
+				ingestionSourceId: archivedEmails.ingestionSourceId,
+				userEmail: archivedEmails.userEmail,
+				messageIdHeader: archivedEmails.messageIdHeader,
+				providerMessageId: archivedEmails.providerMessageId,
+				sentAt: archivedEmails.sentAt,
+				subject: archivedEmails.subject,
+				senderName: archivedEmails.senderName,
+				senderEmail: archivedEmails.senderEmail,
+				recipients: archivedEmails.recipients,
+				hasAttachments: archivedEmails.hasAttachments,
+				archivedAt: archivedEmails.archivedAt,
+				changePosition: archivedEmailChanges.position,
+				path: archivedEmails.path,
+				tags: archivedEmails.tags,
+			})
+			.from(archivedEmailChanges)
+			.innerJoin(archivedEmails, eq(archivedEmailChanges.emailId, archivedEmails.id))
+			.leftJoin(ingestionSources, eq(archivedEmails.ingestionSourceId, ingestionSources.id))
+			.where(and(...conditions))
+			.orderBy(asc(archivedEmailChanges.position))
+			.limit(options.limit + 1);
+
+		const hasMore = rows.length > options.limit;
+		const pageRows = hasMore ? rows.slice(0, options.limit) : rows;
+		const lastRow = pageRows.at(-1);
+		const position =
+			hasMore && lastRow ? lastRow.changePosition.toString() : checkpoint.position.toString();
+
+		return {
+			items: pageRows.map((row) => ({
+				id: row.id,
+				threadId: row.threadId,
+				ingestionSourceId: row.ingestionSourceId,
+				userEmail: row.userEmail,
+				messageIdHeader: row.messageIdHeader,
+				providerMessageId: row.providerMessageId,
+				sentAt: row.sentAt,
+				subject: row.subject,
+				senderName: row.senderName,
+				senderEmail: row.senderEmail,
+				recipients: this.mapRecipients(row.recipients),
+				hasAttachments: row.hasAttachments,
+				archivedAt: row.archivedAt,
+				path: row.path,
+				tags: (row.tags as string[] | null) || null,
+			})),
+			nextCursor: this.encodeChangesCursor({ v: 2, position, scope }),
+			hasMore,
+		};
 	}
 
 	public static async getArchivedEmails(
@@ -205,6 +544,75 @@ export class ArchivedEmailService {
 		}
 
 		return mappedEmail;
+	}
+
+	public static async getArchivedEmailContentById(
+		emailId: string,
+		userId: string,
+		actor: User,
+		actorIp: string
+	): Promise<ArchivedEmailContent | null> {
+		const email = await this.getArchivedEmailById(emailId, userId, actor, actorIp);
+		if (!email?.raw) return null;
+
+		const parsed = await simpleParser(email.raw, { skipImageLinks: true });
+		const contentAttachments = parsed.attachments.map((attachment) => ({
+			filename: attachment.filename || null,
+			contentType: attachment.contentType,
+			size: attachment.size,
+			contentId: attachment.contentId || null,
+			inline: attachment.contentDisposition === 'inline',
+		}));
+
+		// Default ingestion strips regular attachments from the EML. Include their
+		// stored metadata, matching by content hash so retained MIME parts are not
+		// duplicated (even when attachment deduplication has changed the filename).
+		if (email.hasAttachments) {
+			const mimeHashes = new Set(
+				parsed.attachments.map((attachment) =>
+					createHash('sha256').update(attachment.content).digest('hex')
+				)
+			);
+			const stored = await db
+				.select({
+					filename: attachments.filename,
+					contentType: attachments.mimeType,
+					size: attachments.sizeBytes,
+					hash: attachments.contentHashSha256,
+				})
+				.from(emailAttachments)
+				.innerJoin(attachments, eq(emailAttachments.attachmentId, attachments.id))
+				.where(eq(emailAttachments.emailId, emailId));
+			for (const attachment of stored) {
+				if (mimeHashes.has(attachment.hash)) continue;
+				contentAttachments.push({
+					filename: attachment.filename,
+					contentType: attachment.contentType || 'application/octet-stream',
+					size: attachment.size,
+					contentId: null,
+					inline: false,
+				});
+			}
+		}
+		const inReplyTo = Array.isArray(parsed.inReplyTo)
+			? parsed.inReplyTo.join(' ')
+			: parsed.inReplyTo || null;
+
+		return {
+			id: email.id,
+			subject: parsed.subject || email.subject,
+			sentAt: parsed.date || email.sentAt,
+			messageId: parsed.messageId || email.messageIdHeader,
+			inReplyTo,
+			from: this.mapAddressObject(parsed.from),
+			to: this.mapAddressObject(parsed.to),
+			cc: this.mapAddressObject(parsed.cc),
+			bcc: this.mapAddressObject(parsed.bcc),
+			replyTo: this.mapAddressObject(parsed.replyTo),
+			text: parsed.text || null,
+			html: typeof parsed.html === 'string' ? parsed.html : null,
+			attachments: contentAttachments,
+		};
 	}
 
 	public static async deleteArchivedEmail(

@@ -1,4 +1,5 @@
 export * from './schema/archived-emails';
+export * from './schema/archived-email-changes';
 export * from './schema/attachments';
 export * from './schema/audit-logs';
 export * from './schema/calendar-events';
